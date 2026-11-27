@@ -29,6 +29,7 @@
     "presignin-link:local": "npm run check-config",
     "signin-link:local": "node scripts/signin-link.ts --local --url http://localhost:5173",
     "signin-link": "node scripts/signin-link.ts --remote",
+    "icons": "node scripts/icons.ts",
     "push-keys": "node scripts/push-keys.ts",
     "deploy": "node scripts/check-config.ts --deploy && npm run db:migrate && node scripts/deploy-check.ts --remote && npm run build && wrangler deploy",
     "prescreenshots": "npm run check-config",
