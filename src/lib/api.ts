@@ -4,7 +4,12 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const SIGNIN_PATH = '/signin';
 const CODE_PREFIX = '#code=';
 
-export type StatusResult = { kind: 'signed-in'; status: StatusResponse } | { kind: 'signed-out' };
+export type StatusResult =
+  /** `cachedAt` (ms): the service worker had no network and served the last stored status. */
+  { kind: 'signed-in'; status: StatusResponse; cachedAt: number | null } | { kind: 'signed-out' };
+
+/** Set by public/sw.js on a status it serves from its cache. */
+const CACHED_AT_HEADER = 'X-Stackhush-Cached-At';
 
 /**
  * Takes the code out of a sign-in link (/signin#code=...) and replaces the address with /, so
@@ -105,7 +110,12 @@ export async function fetchStatus(): Promise<StatusResult> {
   const response = await fetch('/api/status', { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (response.status === 401) return { kind: 'signed-out' };
   if (!response.ok) throw new Error(`Loading status failed with HTTP ${response.status}`);
-  return { kind: 'signed-in', status: (await response.json()) as StatusResponse };
+  const cachedAt = Number(response.headers.get(CACHED_AT_HEADER));
+  return {
+    kind: 'signed-in',
+    status: (await response.json()) as StatusResponse,
+    cachedAt: Number.isFinite(cachedAt) && cachedAt > 0 ? cachedAt : null,
+  };
 }
 
 export async function signOut(): Promise<void> {

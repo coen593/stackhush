@@ -7,11 +7,19 @@ interface HeaderProps {
   problemCount: number;
   /** The last attempt to load the status failed; what is shown is an older result. */
   refreshFailed: boolean;
+  /** When (ms) the status shown was stored, if the page is offline and shows that copy. */
+  offlineAt: number | null;
   now: number;
 }
 
-export default function Header({ checkedAt, problemCount, refreshFailed, now }: HeaderProps) {
-  const freshness = freshnessOf(checkedAt, refreshFailed, now);
+export default function Header({
+  checkedAt,
+  problemCount,
+  refreshFailed,
+  offlineAt,
+  now,
+}: HeaderProps) {
+  const freshness = freshnessOf(checkedAt, refreshFailed || offlineAt !== null, now);
   const hasProblems = problemCount > 0;
 
   let heading = 'All good';
@@ -24,7 +32,16 @@ export default function Header({ checkedAt, problemCount, refreshFailed, now }: 
   return (
     <header className="pb-2 pt-6">
       <p className="text-xs font-medium uppercase tracking-wider text-muted">stackhush</p>
-      {freshness === 'refresh-failed' && (
+      {offlineAt !== null && (
+        <p
+          className="mt-2 rounded-lg bg-bad-soft px-3 py-2 text-sm font-medium text-warn"
+          role="alert"
+        >
+          Offline, last updated {timeAgo(new Date(offlineAt).toISOString(), now)}. What you see
+          below may be out of date.
+        </p>
+      )}
+      {freshness === 'refresh-failed' && offlineAt === null && (
         <p
           className="mt-2 rounded-lg bg-bad-soft px-3 py-2 text-sm font-medium text-bad"
           role="alert"

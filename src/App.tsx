@@ -1,15 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { GroupView, StatusResponse } from '../shared/api.ts';
 import Attention from './components/Attention.tsx';
 import CheckRow from './components/CheckRow.tsx';
 import Events from './components/Events.tsx';
 import Header from './components/Header.tsx';
+import Notifications from './components/Notifications.tsx';
 import ProjectCard, { hasProblem } from './components/ProjectCard.tsx';
 import SignIn from './components/SignIn.tsx';
 import { useNow } from './hooks/useNow.ts';
 import { useStatus } from './hooks/useStatus.ts';
 import { signOut, type SigninOutcome } from './lib/api.ts';
 import { forgetPendingCode } from './lib/pendingCode.ts';
+import { clearCaches, setBadge, unsubscribeThisDevice } from './lib/push.ts';
 
 const SIGNIN_FAILURES: Partial<Record<SigninOutcome, string>> = {
   rejected: 'That sign-in link did not work: it was already used, expired or mistyped.',
@@ -49,16 +51,18 @@ function Group({ group, now }: { group: GroupView; now: number }) {
 interface DashboardProps {
   status: StatusResponse;
   refreshFailed: boolean;
+  offlineAt: number | null;
   now: number;
 }
 
-function Dashboard({ status, refreshFailed, now }: DashboardProps) {
+function Dashboard({ status, refreshFailed, offlineAt, now }: DashboardProps) {
   return (
     <>
       <Header
         checkedAt={status.checkedAt}
         problemCount={status.problems.length}
         refreshFailed={refreshFailed}
+        offlineAt={offlineAt}
         now={now}
       />
       <SectionTitle>Needs attention</SectionTitle>
@@ -92,6 +96,8 @@ function Dashboard({ status, refreshFailed, now }: DashboardProps) {
           <CheckRow key={source.label} check={source} now={now} />
         ))}
       </div>
+      <SectionTitle>Notifications</SectionTitle>
+      <Notifications vapidPublicKey={status.push.vapidPublicKey} />
     </>
   );
 }
@@ -102,10 +108,21 @@ export default function App({ signinOutcome }: AppProps) {
   const signinFailure = SIGNIN_FAILURES[signinOutcome];
   const [signOutError, setSignOutError] = useState('');
 
+  const problemCount = state.kind === 'ready' ? state.status.problems.length : null;
+  useEffect(() => {
+    if (problemCount !== null) setBadge(problemCount);
+  }, [problemCount]);
+
   const handleSignOut = async () => {
     setSignOutError('');
     try {
+      // This device stops getting notifications, and nothing of the session stays on it.
+      await unsubscribeThisDevice();
+      await clearCaches();
+      setBadge(0);
       await signOut();
+      // A status request that was in flight may have stored a copy again.
+      await clearCaches();
       // The signed-out page starts at the button, not at a code field from before.
       forgetPendingCode(window.localStorage);
       markSignedOut();
@@ -135,7 +152,12 @@ export default function App({ signinOutcome }: AppProps) {
       )}
       {state.kind === 'ready' && (
         <>
-          <Dashboard status={state.status} refreshFailed={state.refreshFailed} now={now} />
+          <Dashboard
+            status={state.status}
+            refreshFailed={state.refreshFailed}
+            offlineAt={state.offlineAt}
+            now={now}
+          />
           <footer className="mt-10 border-t border-line pt-4">
             <button
               type="button"
