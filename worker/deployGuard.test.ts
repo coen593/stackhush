@@ -5,7 +5,12 @@ import exampleConfig from '../stackhush.config.example.ts';
 import { defineConfig, type Config } from './config.ts';
 import { deployProblems, installedConfigProblem } from './deployGuard.ts';
 
-const TEMPLATE = readFileSync(join(import.meta.dirname, '..', 'wrangler.jsonc'), 'utf8');
+// A copy of the wrangler.jsonc this repo ships, not the installed one: a fork fills in its own.
+// scripts/check-templates.ts keeps the two identical upstream.
+const TEMPLATE = readFileSync(
+  join(import.meta.dirname, 'testing', 'wrangler.template.jsonc'),
+  'utf8',
+);
 
 const config: Config = defineConfig({
   dashboardUrl: 'https://status.mysite.test',

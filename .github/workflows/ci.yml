@@ -25,6 +25,11 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      # The shipped wrangler.jsonc and .gitignore are still templates and match the test fixture.
+      # Upstream only: a private fork fills them in on purpose.
+      - name: Check the shipped templates
+        if: github.repository == 'coen593/stackhush'
+        run: npm run check-templates
 
       # Rebuilds with a CI-only config (one uptime URL, https://example.com, no tokens), runs the
       # Worker in workerd, triggers one scheduled run and fails unless the run stored rows and

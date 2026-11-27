@@ -11,8 +11,6 @@ import {
   type StackhushConfig,
 } from './config.ts';
 
-const ROOT = join(import.meta.dirname, '..');
-
 function valid(): StackhushConfig {
   return {
     dashboardUrl: 'https://status.example.test',
@@ -324,14 +322,14 @@ describe('the files a fresh clone starts from', () => {
     }
   });
 
-  it('keeps the git-ignored config out of the repo', () => {
-    expect(readFileSync(join(ROOT, '.gitignore'), 'utf8')).toMatch(/^stackhush\.config\.ts$/m);
-  });
-
   it('lets uptime checks reach Workers on the same account over the public internet', () => {
     // Without this flag a fetch to another Worker on the account's workers.dev subdomain fails
     // with error 1042.
-    const wrangler = readFileSync(join(ROOT, 'wrangler.jsonc'), 'utf8');
+    // The template copy (scripts/check-templates.ts keeps it equal to the shipped file).
+    const wrangler = readFileSync(
+      join(import.meta.dirname, 'testing', 'wrangler.template.jsonc'),
+      'utf8',
+    );
     expect(wrangler).toMatch(/"compatibility_flags":\s*\[[^\]]*"global_fetch_strictly_public"/);
   });
 });

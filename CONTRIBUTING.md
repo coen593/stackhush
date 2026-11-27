@@ -41,6 +41,11 @@ npm test          # vitest
 
 Tests run the real request handler on the real migrations through Node's SQLite
 (`worker/testing/`), with the test config `TEST_CONFIG`, so they pass whatever config is installed.
+Unit tests never read installation files (`wrangler.jsonc`, `.gitignore`, `stackhush.config.ts`),
+so they pass in a private fork too; the deploy-guard tests use the copy
+`worker/testing/wrangler.template.jsonc`. `npm run check-templates` checks that the shipped
+`wrangler.jsonc` equals that copy and still has its placeholders, and that `.gitignore` still
+ignores the config; it runs in CI on the upstream repository only, since a fork fills them in.
 Test the unhappy path (a source that fails, a missing token, a rejected request) as well as the
 happy one.
 

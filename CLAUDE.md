@@ -19,7 +19,11 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
   starts (`worker/index.ts` imports it). Only `worker/index.ts` and `scripts/` import the
   installed config; everything else takes a `Config` argument, and tests use `TEST_CONFIG` from
   `worker/testing/fixtures.ts` through `createWorker` (`worker/app.ts`), so they pass with any
-  installed config.
+  installed config. Tests never read installation files (`wrangler.jsonc`, `.gitignore`, the
+  installed config), so `npm test` passes in a private fork; the deploy-guard tests use
+  `worker/testing/wrangler.template.jsonc`. `scripts/check-templates.ts` (upstream CI only)
+  keeps that copy equal to the shipped `wrangler.jsonc` and checks the placeholders and the
+  `.gitignore` line.
 - Private: never import the config or `worker/` from `src/` (eslint enforces it), because
   everything `src/` imports ships in the public bundle. Group names and whatever else the UI
   needs come from `GET /api/status`.
