@@ -9,7 +9,7 @@ import ProjectCard, { hasProblem } from './components/ProjectCard.tsx';
 import SignIn from './components/SignIn.tsx';
 import { useNow } from './hooks/useNow.ts';
 import { useStatus } from './hooks/useStatus.ts';
-import { signOut, type SigninOutcome } from './lib/api.ts';
+import { errorText, signOut, type SigninOutcome } from './lib/api.ts';
 import { forgetPendingCode } from './lib/pendingCode.ts';
 import { clearCaches, setBadge, unsubscribeThisDevice } from './lib/push.ts';
 
@@ -53,9 +53,10 @@ interface DashboardProps {
   refreshFailed: boolean;
   offlineAt: number | null;
   now: number;
+  reload: () => void;
 }
 
-function Dashboard({ status, refreshFailed, offlineAt, now }: DashboardProps) {
+function Dashboard({ status, refreshFailed, offlineAt, now, reload }: DashboardProps) {
   return (
     <>
       <Header
@@ -97,7 +98,7 @@ function Dashboard({ status, refreshFailed, offlineAt, now }: DashboardProps) {
         ))}
       </div>
       <SectionTitle>Notifications</SectionTitle>
-      <Notifications vapidPublicKey={status.push.vapidPublicKey} />
+      <Notifications push={status.push} onChanged={reload} />
     </>
   );
 }
@@ -108,7 +109,10 @@ export default function App({ signinOutcome }: AppProps) {
   const signinFailure = SIGNIN_FAILURES[signinOutcome];
   const [signOutError, setSignOutError] = useState('');
 
-  const problemCount = state.kind === 'ready' ? state.status.problems.length : null;
+  // Signed out (also when the session ended elsewhere): no number stays on the app icon.
+  let problemCount: number | null = null;
+  if (state.kind === 'ready') problemCount = state.status.problems.length;
+  if (state.kind === 'signed-out') problemCount = 0;
   useEffect(() => {
     if (problemCount !== null) setBadge(problemCount);
   }, [problemCount]);
@@ -116,7 +120,9 @@ export default function App({ signinOutcome }: AppProps) {
   const handleSignOut = async () => {
     setSignOutError('');
     try {
-      // This device stops getting notifications, and nothing of the session stays on it.
+      // This device stops getting notifications, and nothing of the session stays on it. Only
+      // a server that cannot be reached, or fails on a live session, stops the sign-out here;
+      // clearing the caches and the badge is best effort.
       await unsubscribeThisDevice();
       await clearCaches();
       setBadge(0);
@@ -127,7 +133,8 @@ export default function App({ signinOutcome }: AppProps) {
       forgetPendingCode(window.localStorage);
       markSignedOut();
     } catch (error: unknown) {
-      setSignOutError(error instanceof Error ? error.message : 'Something went wrong');
+      console.error('Signing out failed', error);
+      setSignOutError(`Not signed out. ${errorText(error)}`);
     }
   };
 
@@ -157,6 +164,7 @@ export default function App({ signinOutcome }: AppProps) {
             refreshFailed={state.refreshFailed}
             offlineAt={state.offlineAt}
             now={now}
+            reload={() => void reload()}
           />
           <footer className="mt-10 border-t border-line pt-4">
             <button

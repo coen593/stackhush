@@ -37,8 +37,8 @@ export default function Header({
           className="mt-2 rounded-lg bg-bad-soft px-3 py-2 text-sm font-medium text-warn"
           role="alert"
         >
-          Offline, last updated {timeAgo(new Date(offlineAt).toISOString(), now)}. What you see
-          below may be out of date.
+          Offline: this copy was stored {timeAgo(new Date(offlineAt).toISOString(), now)} and may be
+          out of date. A copy older than 7 days is not shown.
         </p>
       )}
       {freshness === 'refresh-failed' && offlineAt === null && (

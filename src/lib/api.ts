@@ -8,6 +8,25 @@ export type StatusResult =
   /** `cachedAt` (ms): the service worker had no network and served the last stored status. */
   { kind: 'signed-in'; status: StatusResponse; cachedAt: number | null } | { kind: 'signed-out' };
 
+/**
+ * No answer from the server: fetch rejects with a TypeError when there is no network, and with a
+ * TimeoutError or AbortError when AbortSignal.timeout fires.
+ */
+export function isNetworkError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  return (
+    error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')
+  );
+}
+
+/** An error in words for the page: no network is said as such, not as "Failed to fetch". */
+export function errorText(error: unknown): string {
+  if (isNetworkError(error)) {
+    return 'Could not reach the server. Check the connection and try again.';
+  }
+  return error instanceof Error ? error.message : 'Something went wrong.';
+}
+
 /** Set by public/sw.js on a status it serves from its cache. */
 const CACHED_AT_HEADER = 'X-Stackhush-Cached-At';
 
@@ -127,6 +146,6 @@ export async function signOut(): Promise<void> {
   });
   // 401 means the session was already gone, which is what signing out wants.
   if (!response.ok && response.status !== 401) {
-    throw new Error(`Sign-out failed with HTTP ${response.status}`);
+    throw new Error(`The server answered HTTP ${response.status}. Try again later.`);
   }
 }

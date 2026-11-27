@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { PushStatus } from '../../shared/api.ts';
+import { errorText } from '../lib/api.ts';
 import {
+  checkSubscription,
   dropSubscription,
   environmentOf,
   readEnvironmentFacts,
   sendTest,
   storeSubscription,
   subscribeBrowser,
-  subscriptionUsesKey,
+  workerRegistration,
   type NotificationsEnvironment,
   type TestOutcome,
 } from '../lib/push.ts';
@@ -19,65 +22,51 @@ const TEST_MESSAGES: Record<TestOutcome, string> = {
   failed:
     'The push service did not accept the test. Try again later; the email alerts are not affected.',
   'try-later': 'Too many tests were sent. Try again later.',
-  'not-set-up': 'Push is not set up on the server.',
+  'not-set-up':
+    'Push is not set up on the server, or its keys are not valid. The alert emails are not affected.',
   unreachable: 'Could not reach the server.',
 };
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Something went wrong';
-}
-
 async function currentSubscription(): Promise<PushSubscription | null> {
-  const registration = await navigator.serviceWorker.getRegistration();
+  const registration = await workerRegistration();
   return (await registration?.pushManager.getSubscription()) ?? null;
 }
 
 /**
- * State and actions of the notifications control. On load it repeats the subscribe call of an
- * existing subscription (an upsert), and replaces one made with a key that has been rotated.
+ * State and actions of the notifications control. On every load it posts an existing
+ * subscription again (checkSubscription), so a device that signed in again is tied to its new
+ * session. `onChanged` runs after the device was turned on or off (to reload the device count).
  */
-export function useNotifications(vapidPublicKey: string | null) {
+export function useNotifications(push: PushStatus, onChanged: () => void) {
   const [mode, setMode] = useState<NotificationsMode>('checking');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const { vapidPublicKey, keys } = push;
 
   useEffect(() => {
     let cancelled = false;
-    const set = (next: NotificationsMode) => {
-      if (!cancelled) setMode(next);
-    };
     void (async () => {
-      const environment = environmentOf(readEnvironmentFacts(vapidPublicKey));
+      const environment = environmentOf(readEnvironmentFacts({ vapidPublicKey, keys }));
       if (environment !== 'ready' || vapidPublicKey === null) {
-        set(environment === 'ready' ? 'not-set-up' : environment);
+        if (!cancelled) setMode(environment === 'ready' ? 'not-set-up' : environment);
         return;
       }
       try {
-        const registration = await navigator.serviceWorker.getRegistration();
-        if (!registration) {
-          set('unsupported');
-          return;
-        }
-        let subscription = await registration.pushManager.getSubscription();
-        if (subscription && !subscriptionUsesKey(subscription, vapidPublicKey)) {
-          await dropSubscription(subscription);
-          subscription =
-            Notification.permission === 'granted'
-              ? await subscribeBrowser(registration, vapidPublicKey)
-              : null;
-        }
-        if (subscription) await storeSubscription(subscription);
-        set(subscription ? 'on' : 'off');
+        const result = await checkSubscription(vapidPublicKey);
+        if (cancelled) return;
+        setMode(result.mode);
+        setMessage(result.message);
       } catch (error: unknown) {
         console.error('Checking notifications failed', error);
-        if (!cancelled) setMessage(errorMessage(error));
-        set('off');
+        if (cancelled) return;
+        setMode('unsupported');
+        setMessage(errorText(error));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [vapidPublicKey]);
+  }, [vapidPublicKey, keys]);
 
   const run = useCallback(async (action: () => Promise<void>) => {
     setBusy(true);
@@ -86,14 +75,14 @@ export function useNotifications(vapidPublicKey: string | null) {
       await action();
     } catch (error: unknown) {
       console.error('Notifications action failed', error);
-      setMessage(errorMessage(error));
+      setMessage(errorText(error));
     } finally {
       setBusy(false);
     }
   }, []);
 
   const subscribe = useCallback(async (key: string) => {
-    const registration = await navigator.serviceWorker.getRegistration();
+    const registration = await workerRegistration();
     if (!registration) throw new Error('The service worker is not running. Reload the page.');
     const subscription = await subscribeBrowser(registration, key);
     try {
@@ -119,6 +108,7 @@ export function useNotifications(vapidPublicKey: string | null) {
       }
       await subscribe(vapidPublicKey);
       setMode('on');
+      onChanged();
     });
 
   const turnOff = () =>
@@ -126,6 +116,7 @@ export function useNotifications(vapidPublicKey: string | null) {
       const subscription = await currentSubscription();
       if (subscription) await dropSubscription(subscription);
       setMode('off');
+      onChanged();
     });
 
   const test = () =>

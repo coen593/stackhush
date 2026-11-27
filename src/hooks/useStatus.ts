@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { StatusResponse } from '../../shared/api.ts';
-import { fetchStatus } from '../lib/api.ts';
+import { errorText, fetchStatus } from '../lib/api.ts';
 
 const REFRESH_INTERVAL_MS = 60_000;
 
@@ -32,7 +32,7 @@ export function useStatus(): {
         offlineAt: result.cachedAt,
       });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Something went wrong';
+      const message = errorText(error);
       // Keep showing the last good data; the header says that it could not be refreshed.
       setState((current) =>
         current.kind === 'ready' ? { ...current, refreshFailed: true } : { kind: 'error', message },
