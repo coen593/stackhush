@@ -870,13 +870,34 @@ async function fetchWorkflowRuns(
       headers: authHeaders(token),
     },
   );
-  return parseWorkflowRuns(body);
+  return parseWorkflowRuns(body, repo);
 }
 
-export function parseWorkflowRuns(body: unknown): WorkflowRun[] {
-  return readArray(readRecord(body), 'workflow_runs').map((item) =>
-    parseWorkflowRun(readRecord(item)),
-  );
+/**
+ * The runs of the branch in this repo. GitHub's `branch` filter goes by the name of a run's head
+ * branch alone, so it also returns the runs of pull requests from forks whose branch has that
+ * name ('main' more often than not). Those say nothing about this repo's branch and are left
+ * out.
+ */
+export function parseWorkflowRuns(body: unknown, repo: string): WorkflowRun[] {
+  return readArray(readRecord(body), 'workflow_runs')
+    .map(readRecord)
+    .filter((run) => isOwnRun(run, repo))
+    .map(parseWorkflowRun);
+}
+
+/**
+ * Whether a run's head branch is a branch of this repo: false for a pull request from a fork,
+ * and for one from a repo that no longer exists (GitHub then sends null). A run without the
+ * field at all is kept, so that an answer that leaves it out is read as it always was rather
+ * than emptied.
+ */
+function isOwnRun(run: Record<string, unknown>, repo: string): boolean {
+  const headRepository = run['head_repository'];
+  if (headRepository === undefined) return true;
+  const fullName = isRecord(headRepository) ? headRepository['full_name'] : null;
+  // GitHub names do not differ by case.
+  return typeof fullName === 'string' && fullName.toLowerCase() === repo.toLowerCase();
 }
 
 function parseWorkflowRun(run: Record<string, unknown>): WorkflowRun {
@@ -921,15 +942,12 @@ export function parseRecentRuns(body: unknown, repo: string): RecentRun[] {
   return readArray(readRecord(body), 'workflow_runs').flatMap((item) => {
     try {
       const run = readRecord(item);
-      const headRepository = run['head_repository'];
-      const headRepo = isRecord(headRepository) ? headRepository['full_name'] : null;
       return [
         {
           ...parseWorkflowRun(run),
           headBranch: typeof run['head_branch'] === 'string' ? run['head_branch'] : null,
           headSha: readString(run, 'head_sha'),
-          // GitHub names do not differ by case.
-          isOwnRepo: typeof headRepo === 'string' && headRepo.toLowerCase() === repo.toLowerCase(),
+          isOwnRepo: isOwnRun(run, repo),
         },
       ];
     } catch (error) {

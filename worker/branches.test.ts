@@ -11,12 +11,7 @@ import type { Fetcher } from './sources/http.ts';
 import { loadStatus } from './status.ts';
 import { createTestEnv } from './testing/env.ts';
 import { createTestDatabase } from './testing/fakeD1.ts';
-import {
-  recentRunsBody,
-  workflowRunsBody,
-  type FixtureRecentRun,
-  type FixtureRun,
-} from './testing/fixtures.ts';
+import { recentRunsBody, type FixtureRecentRun, type FixtureRun } from './testing/fixtures.ts';
 
 const START = new Date('2026-11-26T12:00:00.000Z').getTime();
 const RUN_INTERVAL_MS = 5 * 60 * 1000;
@@ -132,9 +127,16 @@ const network: Fetcher = (url, init) => {
       world.deletedWorkflows.includes(id) ? json({}, 404) : json({ state: 'active' }),
     );
   }
-  if (url.includes('branch=main')) return Promise.resolve(json(workflowRunsBody(world.mainRuns)));
+  if (url.includes('branch=main')) return Promise.resolve(json(mainBody()));
   return Promise.resolve(json(recentRunsBody(REPO, world.recentRuns), world.recentStatus));
 };
+
+function mainBody(): { workflow_runs: unknown[] } {
+  return recentRunsBody(
+    REPO,
+    world.mainRuns.map((run) => on('main', run)),
+  ) as { workflow_runs: unknown[] };
+}
 
 async function runOnce(config: Config): Promise<void> {
   const now = new Date(START + runIndex * RUN_INTERVAL_MS);
@@ -260,6 +262,24 @@ describe('CI on an extra branch', () => {
     expect(check('ci')?.status).toBe('problem');
     expect(check('ci:staging')?.status).toBe('ok');
     expect(events()).toEqual(['ci ci_red: Shop: CI on the default branch went red']);
+  });
+
+  it('keeps the default branch green when a pull request from a fork branch called main fails', async () => {
+    await runOnce(WITH_STAGING);
+    const forkFailed = { ...on('main', finished('failure', 5, '2026-11-26T12:03:00Z')) };
+    const body = recentRunsBody(REPO, [{ ...forkFailed, headRepo: 'someone/shop' }]) as {
+      workflow_runs: unknown[];
+    };
+    const [forkRun] = body.workflow_runs;
+    // The branch filter returns it, since only the branch's name is compared.
+    const withFork: Fetcher = (url, init) =>
+      url.includes('branch=main')
+        ? Promise.resolve(json({ workflow_runs: [forkRun, ...mainBody().workflow_runs] }))
+        : network(url, init);
+    await runChecks(env, new Date(START + RUN_INTERVAL_MS), WITH_STAGING, withFork);
+    expect(check('ci')).toMatchObject({ status: 'ok', summary: 'Passing' });
+    expect(events()).toEqual([]);
+    expect(sent).toEqual([]);
   });
 
   it('ignores a pull request from a fork whose branch has the same name', async () => {
