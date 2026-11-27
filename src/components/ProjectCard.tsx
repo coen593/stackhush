@@ -13,6 +13,7 @@ function checkRows(project: ProjectView): CheckView[] {
     ...project.sites,
     ...(project.deploy ? [project.deploy] : []),
     ...(project.ci ? [project.ci] : []),
+    ...(project.branchCi ?? []),
     ...(project.supabase ? [project.supabase] : []),
     ...project.workers,
   ];

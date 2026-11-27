@@ -56,7 +56,15 @@ export default defineConfig({
       id: 'acme-shop',
       name: 'Acme shop',
       group: 'Acme Inc',
-      github: { owner: 'acme-inc', repo: 'shop', defaultBranch: 'trunk' },
+      // CI is also watched on `staging`, and each open pull request shows its checks. The two
+      // together cost one more subrequest per run.
+      github: {
+        owner: 'acme-inc',
+        repo: 'shop',
+        defaultBranch: 'trunk',
+        extraBranches: ['staging'],
+        pullRequestChecks: true,
+      },
       productionUrls: ['https://shop.example.com', 'https://admin.shop.example.com'],
       supabaseRef: 'tsrqponmlkjihgfedcba',
       cloudflare: { account: 'main', scripts: ['shop-api', 'shop-emails'] },

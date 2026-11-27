@@ -66,8 +66,14 @@ const MADE_UP_PULL_REQUESTS = [
     { number: 214, title: 'Update the onboarding copy', review: true },
     { number: 209, title: 'Bump the chart library', review: false },
   ],
-  [{ number: 88, title: 'Rework the notification settings screen', review: false }],
+  [
+    { number: 88, title: 'Rework the notification settings screen', review: false },
+    { number: 91, title: 'Cache the product list', review: false },
+    { number: 92, title: 'Fix the rounding of totals', review: false },
+  ],
 ];
+// What a repo that shows pull request checks says about its PRs, by position.
+const MADE_UP_CHECKS = ['passing', 'failing', 'running'] as const;
 const pullRequestsOf = (projectId: string) =>
   MADE_UP_PULL_REQUESTS[withRepo.findIndex((project) => project.id === projectId)] ?? [];
 
@@ -122,6 +128,23 @@ for (const project of projects) {
       problemSince: isRed ? ago(2 * HOUR_MS) : undefined,
     });
 
+    for (const branch of project.github.extraBranches) {
+      addCheck({
+        projectId: project.id,
+        checkKey: `ci:${branch}`,
+        status: 'ok',
+        summary: 'Passing',
+        linkUrl: `${repoUrl}/actions`,
+        detail: {
+          label: `CI (${branch})`,
+          at: ago((1 + branch.length) * HOUR_MS),
+          source: repoSource,
+          failing: [],
+        },
+      });
+    }
+
+    const showsChecks = project.github.pullRequestChecks;
     const open = pullRequestsOf(project.id);
     const requested = open.filter((pr) => pr.review).length;
     addCheck({
@@ -132,11 +155,12 @@ for (const project of projects) {
         open.length === 0 ? 'No open PRs' : `${open.length} open, ${requested} need your review`,
       linkUrl: `${repoUrl}/pulls`,
       detail: {
-        pullRequests: open.map((pr) => ({
+        pullRequests: open.map((pr, index) => ({
           number: pr.number,
           title: pr.title,
           url: `${repoUrl}/pull/${pr.number}`,
           isReviewRequestedFromMe: pr.review,
+          ...(showsChecks ? { checks: MADE_UP_CHECKS[index % MADE_UP_CHECKS.length] } : {}),
         })),
         source: repoSource,
       },
