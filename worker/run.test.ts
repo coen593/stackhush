@@ -535,7 +535,7 @@ describe('checks that are no longer reported', () => {
     expect(eventTitles()[1]).toBe('Demo App: Deploy no longer watched');
     expect(count('unsent_alerts')).toBe(0);
     expect(world.sent).toHaveLength(1);
-    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS);
+    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date());
     expect(status.problems).toEqual([]);
   });
 
@@ -575,7 +575,7 @@ describe('checks that are no longer reported', () => {
     await runOnce();
     expect(checkRow('other', OTHER_SITE)).toBeDefined();
     expect(checkRow('demo', downUrl)).toBeUndefined();
-    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS);
+    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date());
     expect(status.problems).toEqual([]);
   });
 
@@ -611,15 +611,15 @@ describe('checks that are no longer reported', () => {
       )
       .run('2026-11-26T11:00:00.000Z');
     expect(
-      (await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS)).problems,
+      (await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date())).problems,
     ).toHaveLength(2);
     await runOnce();
     expect(checkRow('demo', 'worker:renamed')).toBeUndefined();
     expect(count("source_health WHERE source = 'cloudflare:old-name'")).toBe(0);
     expect(count('source_health')).toBe(7);
-    expect((await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS)).problems).toEqual(
-      [],
-    );
+    expect(
+      (await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date())).problems,
+    ).toEqual([]);
   });
 });
 
@@ -635,7 +635,7 @@ describe('a failing alert email', () => {
     world.supabaseStatus = 'INACTIVE';
     await runOnce();
     const failing = (
-      await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS)
+      await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date())
     ).problems.find((problem) => problem.projectId === null);
     expect(failing).toEqual({
       projectId: null,
@@ -646,7 +646,7 @@ describe('a failing alert email', () => {
 
     world.emailFails = false;
     await runOnce();
-    const after = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS);
+    const after = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date());
     expect(after.problems.filter((problem) => problem.projectId === null)).toEqual([]);
   });
 
@@ -657,7 +657,7 @@ describe('a failing alert email', () => {
       )
       .run('2026-11-26T12:00:00.000Z');
     sqlite.prepare("INSERT INTO unsent_alerts (event_id) VALUES ('queued')").run();
-    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS);
+    const status = await loadStatus(env.DB, configWith(world.projects), ALL_SECRETS, new Date());
     expect(status.problems.filter((problem) => problem.projectId === null)).toEqual([]);
   });
 

@@ -52,9 +52,13 @@ interface ReceivedPush {
 }
 
 let vapid: VapidKeys;
+let otherVapid: VapidKeys;
 let sqlite: DatabaseSync;
 let env: Env;
 let sessionId: string;
+let sessionHash: string;
+/** How many redirects the site answers with before its real answer (/h1, /h2, ...). */
+let siteHops: number;
 let now: number;
 let runIndex: number;
 let isSiteDown: boolean;
@@ -69,6 +73,7 @@ let pushStatus: Map<string, number | 'unreachable'>;
 
 beforeAll(async () => {
   vapid = await generateVapidKeys();
+  otherVapid = await generateVapidKeys();
 });
 
 const fetcher: Fetcher = (url, init) => {
@@ -78,6 +83,13 @@ const fetcher: Fetcher = (url, init) => {
   }
   if (url.startsWith(SITE)) {
     log.push('check');
+    const { pathname } = new URL(url);
+    const hop = pathname.startsWith('/h') ? Number(pathname.slice(2)) : 0;
+    if (hop < siteHops) {
+      return Promise.resolve(
+        new Response('', { status: 302, headers: { Location: `/h${hop + 1}` } }),
+      );
+    }
     return Promise.resolve(new Response('', { status: isSiteDown ? 503 : 200 }));
   }
   if (!url.startsWith(`${PUSH_ORIGIN}/send/`)) {
@@ -124,11 +136,19 @@ beforeEach(async () => {
       },
     },
   };
-  sessionId = generateToken();
+  siteHops = 0;
+  sessionId = await addSession();
+  sessionHash = await hashToken(sessionId);
+});
+
+/** A signed-in browser. Returns its session id (the cookie value). */
+async function addSession(): Promise<string> {
+  const id = generateToken();
   sqlite
     .prepare('INSERT INTO sessions (id_hash, expires_at) VALUES (?, ?)')
-    .run(await hashToken(sessionId), new Date(Date.now() + HOUR_MS).toISOString());
-});
+    .run(await hashToken(id), new Date(Date.now() + HOUR_MS).toISOString());
+  return id;
+}
 
 async function makeDevice(name: string): Promise<Device> {
   return { ...(await generateSubscriber()), name, endpoint: `${PUSH_ORIGIN}/send/${name}` };
@@ -139,11 +159,16 @@ function subscriptionOf(device: Device): unknown {
 }
 
 /** A signed-in POST as the dashboard's own page sends it. */
-function post(path: string, body: unknown, config: Config = ROOMY): Promise<Response> {
+function post(
+  path: string,
+  body: unknown,
+  config: Config = ROOMY,
+  session: string = sessionId,
+): Promise<Response> {
   return createWorker(config, fetcher).fetch(
     new Request(`${DASHBOARD}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: `__Host-session=${sessionId}` },
+      headers: { 'Content-Type': 'application/json', Cookie: `__Host-session=${session}` },
       body: typeof body === 'string' ? body : JSON.stringify(body),
     }),
     env,
@@ -151,18 +176,20 @@ function post(path: string, body: unknown, config: Config = ROOMY): Promise<Resp
 }
 
 /** Stores a device's subscription directly, each one a second newer than the one before. */
-function store(device: Device): void {
+function store(device: Device, ownerHash: string = sessionHash): void {
   const created = new Date(now - HOUR_MS + stored().length * 1000).toISOString();
   sqlite
     .prepare(
-      'INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      `INSERT INTO push_subscriptions
+         (endpoint, p256dh, auth, session_hash, last_active_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(device.endpoint, device.p256dh, device.auth, created, created);
+    .run(device.endpoint, device.p256dh, device.auth, ownerHash, created, created, created);
 }
 
 async function devices(...names: string[]): Promise<Device[]> {
   const made = await Promise.all(names.map(makeDevice));
-  made.forEach(store);
+  for (const device of made) store(device);
   return made;
 }
 
@@ -230,7 +257,7 @@ async function payloadOf(push: ReceivedPush | undefined, device: Device): Promis
 }
 
 async function problems(config: Config = ROOMY): Promise<string[]> {
-  const status = await loadStatus(env.DB, config, readSecrets(env, config));
+  const status = await loadStatus(env.DB, config, readSecrets(env, config), new Date());
   return status.problems.map((problem) => problem.title).sort();
 }
 
@@ -279,8 +306,15 @@ describe('POST /api/push/subscribe', () => {
     const response = await post('/api/push/subscribe', body);
     expect(response.status).toBe(204);
     expect(await response.text()).toBe('');
-    expect(sqlite.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions').all()).toEqual([
-      { endpoint: phone.endpoint, p256dh: phone.p256dh, auth: phone.auth },
+    expect(
+      sqlite.prepare('SELECT endpoint, p256dh, auth, session_hash FROM push_subscriptions').all(),
+    ).toEqual([
+      {
+        endpoint: phone.endpoint,
+        p256dh: phone.p256dh,
+        auth: phone.auth,
+        session_hash: sessionHash,
+      },
     ]);
   });
 
@@ -341,23 +375,47 @@ describe('POST /api/push/subscribe', () => {
     expect(count('push_subscriptions')).toBe(0);
   });
 
-  it(`keeps at most ${MAX_SUBSCRIPTIONS}: one more drops the oldest`, async () => {
-    const names = Array.from({ length: MAX_SUBSCRIPTIONS }, (_, index) => `device-${index}`);
-    for (const name of names) {
-      // The route stamps rows with the real clock; the order is what matters here.
+  it('stores one row for one endpoint, however it is spelled', async () => {
+    const phone = await makeDevice('phone');
+    const spelled = { ...phone, endpoint: 'HTTPS://PUSH.example.test:443/send/a/../phone' };
+    expect((await post('/api/push/subscribe', subscriptionOf(spelled))).status).toBe(204);
+    expect((await post('/api/push/subscribe', subscriptionOf(phone))).status).toBe(204);
+    expect(sqlite.prepare('SELECT endpoint FROM push_subscriptions').all()).toEqual([
+      { endpoint: phone.endpoint },
+    ]);
+    // And it can be removed by either spelling.
+    expect((await post('/api/push/unsubscribe', { endpoint: spelled.endpoint })).status).toBe(204);
+    expect(count('push_subscriptions')).toBe(0);
+  });
+
+  it(`keeps at most ${MAX_SUBSCRIPTIONS}: one more drops the least recently active`, async () => {
+    const subscribe = async (name: string) => {
       expect(
         (await post('/api/push/subscribe', subscriptionOf(await makeDevice(name)))).status,
       ).toBe(204);
+      // The route stamps rows with the real clock; the order is what matters here.
       await new Promise((resolve) => setTimeout(resolve, 2));
-    }
+    };
+    const names = Array.from({ length: MAX_SUBSCRIPTIONS }, (_, index) => `device-${index}`);
+    for (const name of names) await subscribe(name);
     expect(storedNames()).toEqual(names);
 
-    // Subscribing again with a stored endpoint drops nobody.
-    await post('/api/push/subscribe', subscriptionOf(await makeDevice('device-3')));
+    // The oldest two show they are in use: one subscribes again, one gets a notification.
+    // Neither drops anybody.
+    await subscribe('device-0');
+    await post('/api/push/test', { endpoint: `${PUSH_ORIGIN}/send/device-1` });
+    await new Promise((resolve) => setTimeout(resolve, 2));
     expect(storedNames()).toEqual(names);
 
-    await post('/api/push/subscribe', subscriptionOf(await makeDevice('newest')));
-    expect(storedNames()).toEqual([...names.slice(1), 'newest']);
+    // So the one that goes is the one nothing was heard from longest, device-2.
+    await subscribe('newest');
+    expect(storedNames()).toEqual([...names.filter((name) => name !== 'device-2'), 'newest']);
+    await subscribe('newer-still');
+    expect(storedNames()).toEqual([
+      ...names.filter((name) => name !== 'device-2' && name !== 'device-3'),
+      'newest',
+      'newer-still',
+    ]);
   });
 
   it('answers 409 without push keys, or with keys that are not a pair, and stores nothing', async () => {
@@ -367,6 +425,9 @@ describe('POST /api/push/subscribe', () => {
       { VAPID_PRIVATE_KEY: undefined },
       { VAPID_PUBLIC_KEY: '' },
       { VAPID_PRIVATE_KEY: vapid.publicKey },
+      // Two real keys, of different pairs.
+      { VAPID_PRIVATE_KEY: otherVapid.privateKey },
+      { VAPID_PUBLIC_KEY: otherVapid.publicKey },
     ];
     for (const change of withoutKeys) {
       env = { ...env, VAPID_PUBLIC_KEY: vapid.publicKey, VAPID_PRIVATE_KEY: vapid.privateKey };
@@ -494,6 +555,15 @@ describe('POST /api/push/test', () => {
     expect(count('push_test_sends')).toBe(0);
   });
 
+  it('has nothing to send and uses up no test when no device is subscribed', async () => {
+    for (let attempt = 0; attempt < MAX_TESTS_PER_HOUR + 2; attempt += 1) {
+      const response = await post('/api/push/test', {});
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ results: [] });
+    }
+    expect(count('push_test_sends')).toBe(0);
+  });
+
   it(`sends at most ${MAX_TESTS_PER_HOUR} an hour`, async () => {
     await devices('phone');
     const realNow = Date.now();
@@ -540,25 +610,60 @@ describe('GET /api/status', () => {
 
   it('gives the public key to subscribe with, and never the private one', async () => {
     const response = await status();
-    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey });
+    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, devices: 0 });
     expect(JSON.stringify(response)).not.toContain(vapid.privateKey);
     expect(response.problems).toEqual([]);
   });
 
   it('says push is not set up without keys, which is not a problem', async () => {
     env = { ...env, VAPID_PUBLIC_KEY: undefined, VAPID_PRIVATE_KEY: undefined };
+    await devices('phone');
     const response = await status();
-    expect(response.push).toEqual({ vapidPublicKey: null });
+    expect(response.push).toEqual({ vapidPublicKey: null, devices: 1 });
+    expect(response.problems).toEqual([]);
+  });
+
+  it('counts the devices of browsers that are still signed in', async () => {
+    const other = await hashToken(await addSession());
+    const [phone, tablet, laptop] = await devices('phone', 'tablet', 'laptop');
+    if (!phone || !tablet || !laptop) throw new Error('No devices');
+    sqlite
+      .prepare('UPDATE push_subscriptions SET session_hash = ? WHERE endpoint <> ?')
+      .run(other, phone.endpoint);
+    expect((await status()).push.devices).toBe(3);
+    sqlite.prepare('DELETE FROM sessions WHERE id_hash = ?').run(other);
+    expect((await status()).push.devices).toBe(1);
+  });
+
+  it('still answers on a database without the push migration', async () => {
+    sqlite.exec('DROP TABLE push_subscriptions');
+    sqlite.exec('DROP TABLE push_test_sends');
+    sqlite.exec('ALTER TABLE run_state DROP COLUMN push_short');
+    await run();
+    const response = await status();
+    expect(response.checkedAt).toBe(new Date(now).toISOString());
+    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, devices: 0 });
     expect(response.problems).toEqual([]);
   });
 
   it('shows a problem for keys that are not a pair', async () => {
-    env = { ...env, VAPID_PRIVATE_KEY: 'not-a-key' };
-    const response = await status();
-    expect(response.push).toEqual({ vapidPublicKey: null });
-    expect(response.problems.map((problem) => problem.title)).toEqual([
-      'Push keys are not valid: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be set together; run npm run push-keys',
-    ]);
+    const notValid =
+      'Push keys are not valid: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be one pair; run npm run push-keys';
+    const broken: Partial<Env>[] = [
+      { VAPID_PRIVATE_KEY: 'not-a-key' },
+      { VAPID_PRIVATE_KEY: undefined },
+      // Well-formed, but the private key of another pair: every push service would refuse it.
+      { VAPID_PRIVATE_KEY: otherVapid.privateKey },
+    ];
+    for (const change of broken) {
+      env = { ...env, VAPID_PRIVATE_KEY: vapid.privateKey, ...change };
+      const response = await status();
+      expect(response.push).toEqual({ vapidPublicKey: null, devices: 0 });
+      expect(response.problems.map((problem) => problem.title)).toEqual([notValid]);
+    }
+    // And the right key again is right again (the check is remembered per pair, not for good).
+    env = { ...env, VAPID_PRIVATE_KEY: vapid.privateKey };
+    expect((await status()).problems).toEqual([]);
   });
 });
 
@@ -663,6 +768,13 @@ describe('a run that alerts', () => {
     expect(lastRunFinished()).toBe(new Date(now).toISOString());
   });
 
+  it('sends nothing with keys that do not belong together', async () => {
+    await devices('phone');
+    env = { ...env, VAPID_PRIVATE_KEY: otherVapid.privateKey };
+    expect(await runUntilAlert()).toEqual(['check', 'check', 'email']);
+    expect(storedNames()).toEqual(['phone']);
+  });
+
   it('pushes nothing without push keys, and says nothing about it', async () => {
     await devices('phone', 'tablet');
     env = { ...env, VAPID_PUBLIC_KEY: undefined, VAPID_PRIVATE_KEY: undefined };
@@ -728,14 +840,45 @@ describe('pushes and the subrequest budget', () => {
     expect(received.map((push) => push.device).sort()).toEqual(['phone', 'tablet']);
   });
 
-  it('pays for a redirect that is known before a push', async () => {
-    await devices('phone');
-    const config = configWith(3);
-    // The site is remembered to take one redirect: with the two checks that is the budget.
+  it('never takes a subrequest from a check: a site that starts redirecting is still checked', async () => {
+    await devices('phone', 'tablet');
+    // Two checks and two devices: nothing spare.
+    const config = configWith(4);
     await run(config);
-    sqlite.exec(`UPDATE check_states SET detail_json = json_set(detail_json, '$.redirects', 1)`);
+    expect(await problems(config)).toEqual([]);
+
+    // The site grows a chain of two redirects. The run follows it there and then, with the
+    // subrequests the pushes would have had; from now on it is the devices that do not fit.
+    siteHops = 2;
+    const before = log.length;
     await run(config);
-    expect(await problems(config)).toEqual([overBudget('1 device')]);
+    expect(log.slice(before)).toEqual(['check', 'check', 'check', 'check']);
+    const check = sqlite.prepare('SELECT status, detail_json FROM check_states').get() as {
+      status: string;
+      detail_json: string;
+    };
+    expect(check.status).toBe('ok');
+    expect(JSON.parse(check.detail_json)).toMatchObject({ redirects: 2 });
+    expect(check.detail_json).not.toContain('short');
+    expect(await problems(config)).toEqual([overBudget('2 devices')]);
+
+    // An alert in that state: emailed, not pushed, and the site was really checked.
+    isSiteDown = true;
+    await run(config);
+    const alerting = log.length;
+    await run(config);
+    expect(log.slice(alerting)).toEqual(['check', 'check', 'check', 'check', 'email']);
+    expect(await problems(config)).toEqual([
+      overBudget('2 devices'),
+      expect.stringContaining('HTTP 503'),
+    ]);
+
+    // The chain goes away again: the next run has room for both devices.
+    siteHops = 0;
+    isSiteDown = false;
+    await run(config);
+    expect(received.map((push) => push.device).sort()).toEqual(['phone', 'tablet']);
+    expect(await problems(config)).toEqual([]);
   });
 
   it('has no problem to show when turning notifications off made room', async () => {
@@ -746,5 +889,106 @@ describe('pushes and the subrequest budget', () => {
     await post('/api/push/unsubscribe', { endpoint: phone?.endpoint }, config);
     await run(config);
     expect(await problems(config)).toEqual([]);
+  });
+});
+
+describe('a subscription and the session that made it', () => {
+  function owners(): unknown[] {
+    return sqlite
+      .prepare('SELECT endpoint, session_hash FROM push_subscriptions ORDER BY created_at')
+      .all();
+  }
+
+  it('moves to the session that subscribes again', async () => {
+    const phone = await makeDevice('phone');
+    await post('/api/push/subscribe', subscriptionOf(phone));
+    expect(owners()).toEqual([{ endpoint: phone.endpoint, session_hash: sessionHash }]);
+
+    const later = await addSession();
+    await post('/api/push/subscribe', subscriptionOf(phone), ROOMY, later);
+    expect(owners()).toEqual([{ endpoint: phone.endpoint, session_hash: await hashToken(later) }]);
+  });
+
+  it('gets nothing from the moment its session signs out, and is deleted by the next run', async () => {
+    const intruder = await addSession();
+    const intruderHash = await hashToken(intruder);
+    const [phone] = await devices('phone');
+    const theirs = await makeDevice('theirs');
+    store(theirs, intruderHash);
+    if (!phone) throw new Error('No device');
+
+    const signOut = await post('/api/signout', {}, ROOMY, intruder);
+    expect(signOut.status).toBe(204);
+
+    // At once: naming that device finds nothing, and a test to all reaches only the device
+    // whose browser is still signed in.
+    expect((await post('/api/push/test', { endpoint: theirs.endpoint })).status).toBe(410);
+    const all = await post('/api/push/test', {});
+    expect(await all.json()).toEqual({ results: [{ outcome: 'sent', status: 201 }] });
+    expect(received.map((push) => push.device)).toEqual(['phone']);
+    expect(storedNames()).toEqual(['phone']);
+
+    // The cron cleanup deletes such a row too, in a run with nothing to say; the other is kept.
+    store(await makeDevice('also-theirs'), intruderHash);
+    await run();
+    expect(owners()).toEqual([{ endpoint: phone.endpoint, session_hash: sessionHash }]);
+  });
+
+  it('gets nothing once its session has expired, also before the session row is cleaned up', async () => {
+    const expiring = await hashToken(await addSession());
+    await devices('phone');
+    store(await makeDevice('old-laptop'), expiring);
+    sqlite
+      .prepare('UPDATE sessions SET expires_at = ? WHERE id_hash = ?')
+      .run(new Date(START - 1000).toISOString(), expiring);
+
+    await post('/api/push/test', {});
+    expect(received.map((push) => push.device)).toEqual(['phone']);
+    expect(storedNames()).toEqual(['phone']);
+    expect(count('sessions')).toBe(2);
+  });
+
+  it('is cut off with every other session by DELETE FROM sessions', async () => {
+    await devices('phone', 'tablet');
+    await run();
+    isSiteDown = true;
+    await run();
+    sqlite.exec('DELETE FROM sessions');
+
+    const before = log.length;
+    await run();
+    expect(log.slice(before)).toEqual(['check', 'check', 'email']);
+    expect(received).toEqual([]);
+    expect(count('push_subscriptions')).toBe(0);
+  });
+
+  it('is deleted by the cron cleanup even on an installation whose push keys were removed', async () => {
+    const gone = await hashToken(await addSession());
+    await devices('phone');
+    store(await makeDevice('theirs'), gone);
+    sqlite.prepare('DELETE FROM sessions WHERE id_hash = ?').run(gone);
+    env = { ...env, VAPID_PUBLIC_KEY: undefined, VAPID_PRIVATE_KEY: undefined };
+    await run();
+    expect(storedNames()).toEqual(['phone']);
+  });
+
+  it('loses the rows a signed-out browser stuffed the table with', async () => {
+    // A browser with a stolen cookie fills the table, pushing out the owner's phone. Signing
+    // it out removes its rows, and the phone subscribes again, as it does on every page load.
+    const intruder = await addSession();
+    const phone = await makeDevice('phone');
+    await post('/api/push/subscribe', subscriptionOf(phone));
+    for (let index = 0; index < MAX_SUBSCRIPTIONS; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      const junk = subscriptionOf(await makeDevice(`junk-${index}`));
+      await post('/api/push/subscribe', junk, ROOMY, intruder);
+    }
+    expect(storedNames()).not.toContain('phone');
+
+    sqlite.prepare('DELETE FROM sessions WHERE id_hash = ?').run(await hashToken(intruder));
+    await run();
+    expect(count('push_subscriptions')).toBe(0);
+    await post('/api/push/subscribe', subscriptionOf(phone));
+    expect(storedNames()).toEqual(['phone']);
   });
 });

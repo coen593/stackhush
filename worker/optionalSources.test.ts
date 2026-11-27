@@ -161,7 +161,7 @@ describe('a Worker with no tokens at all', () => {
     expect(sent).toEqual([]);
     expect(eventKinds()).toEqual([]);
     expect(health()['github:personal']).toEqual(NOT_CONFIGURED);
-    const status = await loadStatus(db, TEST_CONFIG, readSecrets(env, TEST_CONFIG));
+    const status = await loadStatus(db, TEST_CONFIG, readSecrets(env, TEST_CONFIG), new Date());
     expect(status.problems).toEqual([]);
     expect(status.sources.map((source) => [source.label, source.status, source.summary])).toEqual([
       ['Uptime checks', 'ok', 'Working'],
@@ -227,7 +227,7 @@ describe('a Worker with some tokens', () => {
     expect(health()).toMatchObject({ supabase: NOT_CONFIGURED, 'github:personal': NOT_CONFIGURED });
 
     // The dashboard does not show what nobody is checking: no rows, no problems from them.
-    const status = await loadStatus(db, TEST_CONFIG, readSecrets(without, TEST_CONFIG));
+    const status = await loadStatus(db, TEST_CONFIG, readSecrets(without, TEST_CONFIG), new Date());
     const demo = status.groups.flatMap((group) => group.projects).find((p) => p.id === 'demo');
     expect(demo).toMatchObject({ ci: null, deploy: null, pullRequests: null, supabase: null });
     expect(demo?.sites).toHaveLength(2);
@@ -241,6 +241,7 @@ describe('a Worker with some tokens', () => {
       db,
       TEST_CONFIG,
       readSecrets(envWith(ALL_TOKENS), TEST_CONFIG),
+      new Date(),
     );
     expect(withTokens.problems).toHaveLength(3);
   });
@@ -286,9 +287,9 @@ describe('a Worker with some tokens', () => {
     expect(sent).toHaveLength(1);
     const without = envWith({ SUPABASE_TOKEN: 's', CF_TOKEN: 'c' });
     const sourceProblems = async (env: Env) =>
-      (await loadStatus(db, TEST_CONFIG, readSecrets(env, TEST_CONFIG))).problems.filter(
-        (problem) => problem.projectId === null,
-      );
+      (
+        await loadStatus(db, TEST_CONFIG, readSecrets(env, TEST_CONFIG), new Date())
+      ).problems.filter((problem) => problem.projectId === null);
     expect(await sourceProblems(envWith(ALL_TOKENS))).toHaveLength(2);
     // Gone from the dashboard at once, before the next run.
     expect(await sourceProblems(without)).toEqual([]);

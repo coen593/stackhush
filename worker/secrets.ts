@@ -2,12 +2,13 @@
 // optional: a source without its token is "not configured" and is simply not checked.
 
 import { githubTokenSecretName, type Config } from './config.ts';
-import { isVapidKeyPair, type VapidKeys } from './webPush.ts';
+import { isMatchingVapidPair, isVapidKeyPair, type VapidKeys } from './webPush.ts';
 
 /**
  * The push keys (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY, made by `npm run push-keys`). Without
- * them push is simply not set up. `invalid` is one of the two missing, or values that are not
- * a key pair: the dashboard says so, and nothing is sent.
+ * them push is simply not set up. `invalid` is one of the two missing, values that are not
+ * keys, or two keys that do not belong together: the dashboard says so, and nothing is sent.
+ * readSecrets only looks at the shape; confirmVapid checks that the two are a pair.
  */
 export type VapidSecrets =
   { kind: 'absent' } | { kind: 'invalid' } | { kind: 'ready'; keys: VapidKeys };
@@ -46,4 +47,23 @@ function readVapid(publicKey: string | null, privateKey: string | null): VapidSe
   if (publicKey === null || privateKey === null) return { kind: 'invalid' };
   const keys = { publicKey, privateKey };
   return isVapidKeyPair(keys) ? { kind: 'ready', keys } : { kind: 'invalid' };
+}
+
+// The pair is checked once per isolate (two signature operations), not on every request.
+let checkedPair: { keys: VapidKeys; isPair: Promise<boolean> } | null = null;
+
+/**
+ * The same secrets, with push keys that are not a pair marked `invalid`. Everything that acts on
+ * the push keys (the routes, the run, the status) reads them through this.
+ */
+export async function confirmVapid(secrets: Secrets): Promise<Secrets> {
+  if (secrets.vapid.kind !== 'ready') return secrets;
+  const { keys } = secrets.vapid;
+  if (
+    checkedPair?.keys.publicKey !== keys.publicKey ||
+    checkedPair.keys.privateKey !== keys.privateKey
+  ) {
+    checkedPair = { keys, isPair: isMatchingVapidPair(keys) };
+  }
+  return (await checkedPair.isPair) ? secrets : { ...secrets, vapid: { kind: 'invalid' } };
 }

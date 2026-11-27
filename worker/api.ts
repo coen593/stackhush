@@ -18,6 +18,7 @@ import {
 } from './emailSignin.ts';
 import {
   composePayload,
+  deleteOrphanedSubscriptions,
   deleteSubscription,
   findSubscription,
   loadSubscriptions,
@@ -29,7 +30,7 @@ import {
   sendPushes,
 } from './push.ts';
 import { emptyResponse, jsonResponse } from './responses.ts';
-import { readSecrets } from './secrets.ts';
+import { confirmVapid, readSecrets } from './secrets.ts';
 import { isRecord, type Fetcher } from './sources/http.ts';
 import { loadStatus } from './status.ts';
 
@@ -90,8 +91,11 @@ export const protectedRoutes: readonly ApiRoute[] = [
   {
     method: 'GET',
     path: '/api/status',
-    handle: async ({ db, env, config }) =>
-      jsonResponse(await loadStatus(db, config, readSecrets(env, config)), 200),
+    handle: async ({ db, env, config, now }) =>
+      jsonResponse(
+        await loadStatus(db, config, await confirmVapid(readSecrets(env, config)), now),
+        200,
+      ),
   },
   {
     method: 'POST',
@@ -174,11 +178,14 @@ async function verifyTypedCode({ request, env, now }: SessionFreeContext): Promi
  * Stores this browser's push subscription. 409 when the installation has no push keys: the
  * browser could not have made a subscription for it.
  */
-async function subscribePush({ request, db, env, config, now }: RequestContext): Promise<Response> {
-  if (readSecrets(env, config).vapid.kind !== 'ready') return emptyResponse(409);
+async function subscribePush(context: RequestContext): Promise<Response> {
+  const { request, db, env, config, now, sessionHash } = context;
+  const secrets = await confirmVapid(readSecrets(env, config));
+  if (secrets.vapid.kind !== 'ready') return emptyResponse(409);
   const subscription = await parseSubscription(await readJson(request, MAX_PUSH_BODY_BYTES));
   if (subscription === null) return emptyResponse(400);
-  await saveSubscription(db, subscription, now);
+  // It lives as long as this session does (worker/push.ts).
+  await saveSubscription(db, subscription, sessionHash, now);
   return emptyResponse(204);
 }
 
@@ -198,24 +205,29 @@ async function unsubscribePush({ request, db }: RequestContext): Promise<Respons
  */
 async function testPush(context: RequestContext): Promise<Response> {
   const { request, db, env, config, now, fetcher } = context;
-  const secrets = readSecrets(env, config);
+  const secrets = await confirmVapid(readSecrets(env, config));
   if (secrets.vapid.kind !== 'ready') return emptyResponse(409);
   const body = await readJson(request, MAX_PUSH_BODY_BYTES);
   if (!isRecord(body)) return emptyResponse(400);
 
+  await deleteOrphanedSubscriptions(db, now);
   let subscriptions;
   if (body['endpoint'] === undefined) {
-    subscriptions = await loadSubscriptions(db, MAX_SUBSCRIPTIONS);
+    subscriptions = await loadSubscriptions(db, MAX_SUBSCRIPTIONS, now);
   } else {
     const endpoint = parseEndpoint(body['endpoint']);
     if (endpoint === null) return emptyResponse(400);
-    const subscription = await findSubscription(db, endpoint);
+    const subscription = await findSubscription(db, endpoint, now);
     if (subscription === null) return emptyResponse(410);
     subscriptions = [subscription];
   }
+  // Nothing to send: no reason to use up one of the hour's tests.
+  if (subscriptions.length === 0) {
+    return jsonResponse({ results: [] } satisfies PushTestResponse, 200);
+  }
   if (!(await reserveTestSend(db, now))) return emptyResponse(429);
 
-  const status = await loadStatus(db, config, secrets);
+  const status = await loadStatus(db, config, secrets, now);
   const results = await sendPushes(
     { db, fetcher, keys: secrets.vapid.keys, config, now },
     subscriptions,

@@ -19,6 +19,7 @@ import {
   type Project,
 } from './config.ts';
 import { SHORT_KEY, uptimeCheckKey } from './budget.ts';
+import { countSubscriptions } from './push.ts';
 import type { Secrets } from './secrets.ts';
 import { parseDetail } from './store.ts';
 import {
@@ -69,12 +70,13 @@ export async function loadStatus(
   db: D1Database,
   config: Config,
   secrets: Secrets,
+  now: Date,
 ): Promise<StatusResponse> {
   const { projects } = config;
-  const [run, checks, sources, events, failingEvents, unsent] = await Promise.all([
+  const [run, checks, sources, events, failingEvents, unsent, push] = await Promise.all([
     db
-      .prepare('SELECT last_run_finished_at, push_short FROM run_state WHERE id = 1')
-      .first<{ last_run_finished_at: string | null; push_short: number }>(),
+      .prepare('SELECT last_run_finished_at FROM run_state WHERE id = 1')
+      .first<{ last_run_finished_at: string | null }>(),
     db
       .prepare(
         'SELECT project_id, check_key, status, summary, link_url, detail_json, problem_since, observed_at FROM check_states',
@@ -103,6 +105,7 @@ export async function loadStatus(
          WHERE unsent_alerts.attempts > 0`,
       )
       .first<UnsentRow>(),
+    loadPushState(db, now),
   ]);
 
   const configured = sources.results.filter((row) => isConfigured(row.source, secrets));
@@ -121,7 +124,7 @@ export async function loadStatus(
       ...budgetProblems(current),
       ...sourceProblems(configured, failingEvents.results, config),
       ...emailProblems(unsent),
-      ...pushProblems(secrets, run),
+      ...pushProblems(secrets, push, run?.last_run_finished_at ?? now.toISOString()),
     ].sort((a, b) => b.since.localeCompare(a.since)),
     groups,
     unassigned: (byProject.get(UNASSIGNED_PROJECT_ID) ?? []).map(toCheckView),
@@ -133,7 +136,10 @@ export async function loadStatus(
       ),
     ),
     events: events.results.map(toEventView),
-    push: { vapidPublicKey: secrets.vapid.kind === 'ready' ? secrets.vapid.keys.publicKey : null },
+    push: {
+      vapidPublicKey: secrets.vapid.kind === 'ready' ? secrets.vapid.keys.publicKey : null,
+      devices: push.devices,
+    },
   };
 }
 
@@ -298,31 +304,51 @@ function emailProblems(unsent: UnsentRow | null): ProblemView[] {
   ];
 }
 
+interface PushState {
+  /** Subscriptions the last run had no subrequest for. */
+  short: number;
+  devices: number;
+}
+
+/**
+ * What the dashboard says about push, read apart from everything else: a database that does
+ * not have the push migration yet (a Worker deployed ahead of its schema) must still show its
+ * status, with push at nothing.
+ */
+async function loadPushState(db: D1Database, now: Date): Promise<PushState> {
+  try {
+    const [run, devices] = await Promise.all([
+      db.prepare('SELECT push_short FROM run_state WHERE id = 1').first<{ push_short: number }>(),
+      countSubscriptions(db, now),
+    ]);
+    return { short: run?.push_short ?? 0, devices };
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
+    console.error(`Reading the push state failed (${code}); shown as none`);
+    return { short: 0, devices: 0 };
+  }
+}
+
 /**
  * Push is optional: without its keys there is nothing to say. Two things are worth a line.
  * Keys that are set but are not a key pair, because then the owner believes push works. And
- * subscriptions the last run had no subrequest for (worker/budget.ts): the email still went
+ * subscriptions the last run had no subrequest left for (worker/run.ts): the email still went
  * out, but that phone stays silent until the budget has room.
  */
-function pushProblems(
-  secrets: Secrets,
-  run: { last_run_finished_at: string | null; push_short: number } | null,
-): ProblemView[] {
-  // Sorts with the newest: it is true as of the last run, or as of now before any run.
-  const since = run?.last_run_finished_at ?? new Date().toISOString();
+function pushProblems(secrets: Secrets, push: PushState, since: string): ProblemView[] {
   if (secrets.vapid.kind === 'invalid') {
     return [
       {
         projectId: null,
         title:
-          'Push keys are not valid: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be set together; run npm run push-keys',
+          'Push keys are not valid: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be one pair; run npm run push-keys',
         linkUrl: null,
         since,
       },
     ];
   }
-  if (secrets.vapid.kind === 'absent' || !run || run.push_short === 0) return [];
-  const devices = run.push_short === 1 ? '1 device' : `${run.push_short} devices`;
+  if (secrets.vapid.kind === 'absent' || push.short === 0) return [];
+  const devices = push.short === 1 ? '1 device' : `${push.short} devices`;
   return [
     {
       projectId: null,

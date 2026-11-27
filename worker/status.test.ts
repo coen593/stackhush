@@ -61,7 +61,7 @@ describe('loadStatus', () => {
   });
 
   it('is empty before the first run', async () => {
-    const status = await loadStatus(db, TEST_CONFIG, ALL_SECRETS);
+    const status = await loadStatus(db, TEST_CONFIG, ALL_SECRETS, new Date());
     expect(status).toMatchObject({ checkedAt: null, problems: [], groups: [], events: [] });
   });
 
@@ -72,7 +72,7 @@ describe('loadStatus', () => {
     } as Env;
     await runChecks(env, new Date('2026-11-26T12:00:00.000Z'), TEST_CONFIG, fetcher);
     await runChecks(env, new Date('2026-11-26T12:05:00.000Z'), TEST_CONFIG, fetcher);
-    const status = await loadStatus(db, TEST_CONFIG, ALL_SECRETS);
+    const status = await loadStatus(db, TEST_CONFIG, ALL_SECRETS, new Date());
 
     expect(status.checkedAt).toBe('2026-11-26T12:05:00.000Z');
     expect(status.unassigned.map((view) => view.label)).toEqual(['stray-project']);

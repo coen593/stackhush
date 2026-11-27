@@ -85,6 +85,11 @@ export interface PushStatus {
    * a P-256 public key, base64url. Null when push is not set up on this installation.
    */
   vapidPublicKey: string | null;
+  /**
+   * How many browsers get push notifications now: the subscriptions of sessions that are still
+   * signed in. One you do not recognise means someone else's browser is signed in.
+   */
+  devices: number;
 }
 
 /**

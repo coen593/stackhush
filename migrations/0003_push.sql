@@ -2,8 +2,10 @@
 -- Additive only: nothing here changes what 0001 and 0002 store.
 
 -- One row per browser that turned notifications on. At most 10 are kept (worker/push.ts): when
--- an 11th arrives, the oldest goes. A row is deleted when its browser turns notifications off
--- and when the push service says the subscription no longer exists (404 or 410).
+-- an 11th arrives, the one that was active longest ago goes. A row is deleted when its browser
+-- turns notifications off, when the push service says the subscription no longer exists (404
+-- or 410), and when the session that made it is gone (signed out, expired, or deleted with
+-- `DELETE FROM sessions`): a browser that is no longer signed in gets no more alerts.
 -- Nothing here is a secret of the Worker: the endpoint and keys are made by the browser, and a
 -- push service only accepts messages for an endpoint that are signed with the Worker's VAPID
 -- private key, which lives in a secret and never in this database.
@@ -14,6 +16,13 @@ CREATE TABLE push_subscriptions (
   -- base64url as the browser gives them. Messages are encrypted to them (RFC 8291).
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
+  -- sessions.id_hash of the session that subscribed (last). No foreign key: the row is removed
+  -- by the Worker (cron cleanup, and before every send), which also covers a session that has
+  -- expired but is not deleted yet.
+  session_hash TEXT NOT NULL,
+  -- When this browser last subscribed or was last sent a notification the push service
+  -- accepted. At the cap, the row with the oldest one goes.
+  last_active_at TEXT NOT NULL,
   -- Sends in a row that the push service did not accept; back to 0 at the next accepted one.
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   last_success_at TEXT,

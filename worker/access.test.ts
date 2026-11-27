@@ -131,8 +131,11 @@ describe('the push routes', () => {
 
   function seedSubscription(): void {
     sqlite
-      .prepare('INSERT INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)')
-      .run('https://push.example.test/send/phone', 'p256dh', 'auth');
+      .prepare(
+        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, session_hash, last_active_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('https://push.example.test/send/phone', 'p256dh', 'auth', 'a-session', 'earlier');
   }
 
   function pushRows(): unknown {
@@ -276,7 +279,7 @@ describe('signing in', () => {
       events: [],
       sources: expect.any(Array) as unknown,
       // The test env has no push keys.
-      push: { vapidPublicKey: null },
+      push: { vapidPublicKey: null, devices: 0 },
     });
   });
 

@@ -17,7 +17,7 @@ import {
   type VapidKeys,
 } from './webPush.ts';
 
-/** When one more subscribes, the oldest is dropped. One owner has a handful of devices. */
+/** When one more subscribes, the least recently active is dropped. One owner has a handful. */
 export const MAX_SUBSCRIPTIONS = 10;
 export const MAX_TESTS_PER_HOUR = 5;
 /** Real endpoints are a few hundred characters. */
@@ -41,14 +41,16 @@ export interface Subscription {
 
 /**
  * Reads an endpoint from a request: an https URL of a sane length without credentials. Which
- * push service it belongs to is not checked: there is no complete list of them.
+ * push service it belongs to is not checked: there is no complete list of them. Returns the
+ * URL in its normal form, so two spellings of one endpoint are one row, and subscribing and
+ * unsubscribing always mean the same one.
  */
 export function parseEndpoint(value: unknown): string | null {
   if (typeof value !== 'string' || value.length > MAX_ENDPOINT_LENGTH) return null;
   if (!URL.canParse(value)) return null;
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return null;
-  return value;
+  return url.href.length > MAX_ENDPOINT_LENGTH ? null : url.href;
 }
 
 /**
@@ -73,37 +75,58 @@ export async function parseSubscription(body: unknown): Promise<Subscription | n
   return { endpoint, p256dh, auth };
 }
 
+// A subscription only counts while the session that made it does: a browser that was signed
+// out (or whose session expired, or a stolen session that was cut off with DELETE FROM sessions)
+// must not go on receiving alerts. Every read below has this condition; binds one value, now.
+const HAS_LIVE_SESSION = 'session_hash IN (SELECT id_hash FROM sessions WHERE expires_at > ?)';
+
 /**
- * Stores a subscription. Subscribing again with the same endpoint replaces its keys and
- * forgets its failures, so the page can simply repeat it. Past MAX_SUBSCRIPTIONS the oldest
- * of the others are deleted, in the same transaction.
+ * Stores a subscription for the session that asks. Subscribing again with the same endpoint
+ * replaces its keys, hands it to the session that asks now and forgets its failures, so the
+ * page can simply repeat it. Past MAX_SUBSCRIPTIONS the least recently active of the others
+ * are deleted, in the same transaction.
  */
 export async function saveSubscription(
   db: D1Database,
   subscription: Subscription,
+  sessionHash: string,
   now: Date,
 ): Promise<void> {
   const nowText = now.toISOString();
+  const { endpoint, p256dh, auth } = subscription;
   await db.batch([
     db
       .prepare(
-        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO push_subscriptions
+           (endpoint, p256dh, auth, session_hash, last_active_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (endpoint) DO UPDATE SET
-           p256dh = excluded.p256dh, auth = excluded.auth, consecutive_failures = 0,
+           p256dh = excluded.p256dh, auth = excluded.auth, session_hash = excluded.session_hash,
+           last_active_at = excluded.last_active_at, consecutive_failures = 0,
            updated_at = excluded.updated_at`,
       )
-      .bind(subscription.endpoint, subscription.p256dh, subscription.auth, nowText, nowText),
+      .bind(endpoint, p256dh, auth, sessionHash, nowText, nowText, nowText),
     db
       .prepare(
         `DELETE FROM push_subscriptions
          WHERE endpoint <> ? AND endpoint NOT IN (
            SELECT endpoint FROM push_subscriptions WHERE endpoint <> ?
-           ORDER BY created_at DESC, endpoint LIMIT ?
+           ORDER BY last_active_at DESC, endpoint LIMIT ?
          )`,
       )
-      .bind(subscription.endpoint, subscription.endpoint, MAX_SUBSCRIPTIONS - 1),
+      .bind(endpoint, endpoint, MAX_SUBSCRIPTIONS - 1),
   ]);
+}
+
+/**
+ * Deletes the subscriptions whose session is gone or expired. The cron run does this, and so
+ * does every send before it reads them.
+ */
+export async function deleteOrphanedSubscriptions(db: D1Database, now: Date): Promise<void> {
+  await db
+    .prepare(`DELETE FROM push_subscriptions WHERE NOT ${HAS_LIVE_SESSION}`)
+    .bind(now.toISOString())
+    .run();
 }
 
 /** Deletes one subscription. Deleting one that is not there is not an error. */
@@ -111,20 +134,26 @@ export async function deleteSubscription(db: D1Database, endpoint: string): Prom
   await db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint).run();
 }
 
-export async function countSubscriptions(db: D1Database): Promise<number> {
+export async function countSubscriptions(db: D1Database, now: Date): Promise<number> {
   const row = await db
-    .prepare('SELECT COUNT(*) AS total FROM push_subscriptions')
+    .prepare(`SELECT COUNT(*) AS total FROM push_subscriptions WHERE ${HAS_LIVE_SESSION}`)
+    .bind(now.toISOString())
     .first<{ total: number }>();
   return row?.total ?? 0;
 }
 
 /** The oldest `limit` subscriptions: when a run cannot pay for all, the newest ones wait. */
-export async function loadSubscriptions(db: D1Database, limit: number): Promise<Subscription[]> {
+export async function loadSubscriptions(
+  db: D1Database,
+  limit: number,
+  now: Date,
+): Promise<Subscription[]> {
   const { results } = await db
     .prepare(
-      'SELECT endpoint, p256dh, auth FROM push_subscriptions ORDER BY created_at, endpoint LIMIT ?',
+      `SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ${HAS_LIVE_SESSION}
+       ORDER BY created_at, endpoint LIMIT ?`,
     )
-    .bind(limit)
+    .bind(now.toISOString(), limit)
     .all<Subscription>();
   return results;
 }
@@ -132,10 +161,14 @@ export async function loadSubscriptions(db: D1Database, limit: number): Promise<
 export async function findSubscription(
   db: D1Database,
   endpoint: string,
+  now: Date,
 ): Promise<Subscription | null> {
   return db
-    .prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE endpoint = ?')
-    .bind(endpoint)
+    .prepare(
+      `SELECT endpoint, p256dh, auth FROM push_subscriptions
+       WHERE endpoint = ? AND ${HAS_LIVE_SESSION}`,
+    )
+    .bind(endpoint, now.toISOString())
     .first<Subscription>();
 }
 
@@ -236,9 +269,9 @@ async function storeResults(
     if (outcome === 'sent') {
       return db
         .prepare(
-          'UPDATE push_subscriptions SET consecutive_failures = 0, last_success_at = ?, updated_at = ? WHERE endpoint = ?',
+          'UPDATE push_subscriptions SET consecutive_failures = 0, last_success_at = ?, last_active_at = ?, updated_at = ? WHERE endpoint = ?',
         )
-        .bind(now, now, endpoint);
+        .bind(now, now, now, endpoint);
     }
     return db
       .prepare(

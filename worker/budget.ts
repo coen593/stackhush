@@ -1,5 +1,5 @@
 // A run's subrequests: what the plan takes (worker/config.ts), and how what is left of the
-// budget is shared among the redirects of uptime checks and the push notifications. A run never makes more than the budget.
+// budget is shared among the redirects of uptime checks. A run never makes more than the budget.
 
 import { MAX_UPTIME_REDIRECTS, plannedSubrequests, type Config } from './config.ts';
 import type { Secrets } from './secrets.ts';
@@ -40,14 +40,8 @@ export interface RedirectAllowance {
   spare: number;
 }
 
-export interface BudgetShare {
-  redirects: RedirectAllowance;
-  /** How many push notifications the run may send: at most one per stored subscription. */
-  pushes: number;
-}
-
 /**
- * Shares what the budget has left after the plan, in this order:
+ * Shares what the budget has left after the plan among the uptime URLs, in this order:
  *
  * 1. URLs whose last check was completed get the redirects it took. A chain that is known to
  *    work is always paid for while it fits, whatever happens to other URLs.
@@ -57,21 +51,16 @@ export interface BudgetShare {
  *    come second, wherever they are in the config: what they remember is partly a guess (at
  *    least one more than they could follow), and it must not take a subrequest from a chain
  *    that did complete.
- * 3. One push notification per stored subscription, as far as it goes. They are set aside in
- *    every run, also one that turns out to have nothing to say, so the run can never go over.
- *    A check always comes before a notification: the email carries the alert anyway.
- * 4. The rest is spare, for redirects nobody knew about.
+ * 3. The rest is spare, for redirects nobody knew about.
  *
- * Within steps 1 and 2 the order of the config decides. A URL that gets fewer than it needs
- * says so in its check (see worker/sources/uptime.ts); subscriptions that do not fit are a
- * problem on the dashboard (worker/push.ts).
+ * Within a step the order of the config decides. A URL that gets fewer than it needs says so in
+ * its check (see worker/sources/uptime.ts).
  */
-export function shareBudget(
+export function allowRedirects(
   config: Config,
   secrets: Secrets,
   previous: ReadonlyMap<string, PreviousCheck>,
-  pushSubscriptions: number,
-): BudgetShare {
+): RedirectAllowance {
   const planned = plannedSubrequests(config, {
     github: (ownerKey) => secrets.github.has(ownerKey),
     supabase: secrets.supabase !== null,
@@ -90,6 +79,5 @@ export function shareBudget(
   const ranShort = (key: string) => rememberedShort(previous.get(key)) !== null;
   keys.filter((key) => !ranShort(key)).forEach(reserve);
   keys.filter(ranShort).forEach(reserve);
-  const pushes = Math.min(pushSubscriptions, left);
-  return { redirects: { reserved, spare: left - pushes }, pushes };
+  return { reserved, spare: left };
 }

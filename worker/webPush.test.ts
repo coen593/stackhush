@@ -5,6 +5,7 @@ import {
   encryptPayload,
   generateFreshSecrets,
   generateVapidKeys,
+  isMatchingVapidPair,
   isVapidKeyPair,
   MAX_PLAINTEXT_BYTES,
   vapidAuthorization,
@@ -169,6 +170,15 @@ describe('VAPID', () => {
     await expect(vapidAuthorization({ publicKey: 'x', privateKey: 'y' }, claims)).rejects.toThrow(
       'malformed',
     );
+  });
+
+  it('tells a pair from two keys that do not belong together', async () => {
+    const keys = await generateVapidKeys();
+    const other = await generateVapidKeys();
+    expect(await isMatchingVapidPair(keys)).toBe(true);
+    expect(await isMatchingVapidPair({ ...keys, privateKey: other.privateKey })).toBe(false);
+    expect(await isMatchingVapidPair({ ...keys, publicKey: other.publicKey })).toBe(false);
+    expect(await isMatchingVapidPair({ publicKey: 'x', privateKey: 'y' })).toBe(false);
   });
 
   it('signs an ES256 token that verifies with the public key in the header', async () => {

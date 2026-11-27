@@ -3,7 +3,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { shareBudget } from './budget.ts';
+import { allowRedirects } from './budget.ts';
 import { defineConfig, type Config } from './config.ts';
 import { runChecks } from './run.ts';
 import { readSecrets, type Secrets } from './secrets.ts';
@@ -101,7 +101,7 @@ function eventKinds(): string[] {
 }
 
 async function problems(config: Config): Promise<string[]> {
-  const status = await loadStatus(env.DB, config, readSecrets(env, config));
+  const status = await loadStatus(env.DB, config, readSecrets(env, config), new Date());
   return status.problems.map((problem) => problem.title);
 }
 
@@ -320,15 +320,13 @@ describe('a run and its subrequest budget', () => {
   });
 });
 
-describe('shareBudget', () => {
+describe('allowRedirects', () => {
   const secrets: Secrets = {
     github: new Map(),
     supabase: 'token',
     cloudflare: null,
     vapid: { kind: 'absent' },
   };
-  const allowRedirects = (config: Config, previous: Map<string, PreviousCheck>) =>
-    shareBudget(config, secrets, previous, 0).redirects;
   const remembering = (redirects: Record<number, number>): Map<string, PreviousCheck> =>
     new Map(
       Object.entries(redirects).map(([index, count]) => [
@@ -347,7 +345,7 @@ describe('shareBudget', () => {
     );
 
   it('sets aside what each URL took last time and leaves the rest spare', () => {
-    const allowance = allowRedirects(configWith(12), remembering({ 1: 2, 4: 1 }));
+    const allowance = allowRedirects(configWith(12), secrets, remembering({ 1: 2, 4: 1 }));
     expect(allowance.reserved.get(siteKey(1))).toBe(2);
     expect(allowance.reserved.get(siteKey(4))).toBe(1);
     expect(allowance.reserved.get(siteKey(0))).toBe(0);
@@ -359,51 +357,24 @@ describe('shareBudget', () => {
     const previous = remembering({ 0: 3, 2: 1, 4: 1 });
     const short = previous.get(siteKey(0));
     if (short) short.detail = { redirects: 3, short: 1 };
-    const allowance = allowRedirects(configWith(10), previous);
+    const allowance = allowRedirects(configWith(10), secrets, previous);
     expect([...allowance.reserved.values()]).toEqual([1, 0, 1, 0, 1, 0]);
     expect(allowance.spare).toBe(0);
     // With room for everything it gets all it remembers, and the rest is spare.
-    const roomy = allowRedirects(configWith(14), previous);
+    const roomy = allowRedirects(configWith(14), secrets, previous);
     expect([...roomy.reserved.values()]).toEqual([3, 0, 1, 0, 1, 0]);
     expect(roomy.spare).toBe(2);
   });
 
   it('never hands out more than the budget has left, in the order of the config', () => {
-    const allowance = allowRedirects(configWith(9), remembering({ 1: 1, 2: 3, 4: 1 }));
+    const allowance = allowRedirects(configWith(9), secrets, remembering({ 1: 1, 2: 3, 4: 1 }));
     expect([...allowance.reserved.values()]).toEqual([0, 1, 1, 0, 0, 0]);
     expect(allowance.spare).toBe(0);
   });
 
   it('ignores a stored count that cannot be right', () => {
-    const allowance = allowRedirects(configWith(40), remembering({ 0: 99, 1: -1 }));
+    const allowance = allowRedirects(configWith(40), secrets, remembering({ 0: 99, 1: -1 }));
     expect(allowance.reserved.get(siteKey(0))).toBe(5);
     expect(allowance.reserved.get(siteKey(1))).toBe(0);
-  });
-
-  it('sets pushes aside after the redirects that are known and before the spare', () => {
-    // 7 planned and 3 remembered redirects leave 5 of 15.
-    const previous = remembering({ 1: 2, 4: 1 });
-    const none = shareBudget(configWith(15), secrets, previous, 0);
-    expect(none).toMatchObject({ pushes: 0, redirects: { spare: 5 } });
-    const three = shareBudget(configWith(15), secrets, previous, 3);
-    expect(three).toMatchObject({ pushes: 3, redirects: { spare: 2 } });
-    expect([...three.redirects.reserved.values()]).toEqual([0, 2, 0, 0, 1, 0]);
-  });
-
-  it("gives pushes only what is left: some of them, or none, never a redirect's subrequest", () => {
-    const previous = remembering({ 1: 2, 4: 1 });
-    const some = shareBudget(configWith(12), secrets, previous, 3);
-    expect(some).toMatchObject({ pushes: 2, redirects: { spare: 0 } });
-    expect([...some.redirects.reserved.values()]).toEqual([0, 2, 0, 0, 1, 0]);
-    const noRoom = shareBudget(configWith(10), secrets, previous, 3);
-    expect(noRoom).toMatchObject({ pushes: 0, redirects: { spare: 0 } });
-    expect([...noRoom.redirects.reserved.values()]).toEqual([0, 2, 0, 0, 1, 0]);
-  });
-
-  it('fits three phones in a plan of 43 of 50 with 3 remembered redirects', () => {
-    // 36 more sites than the six of configWith would be noise: the same arithmetic on a
-    // budget that leaves 7 after the plan, like 50 - 43.
-    const share = shareBudget(configWith(14), secrets, remembering({ 0: 1, 1: 1, 2: 1 }), 3);
-    expect(share).toMatchObject({ pushes: 3, redirects: { spare: 1 } });
   });
 });

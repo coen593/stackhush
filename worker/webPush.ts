@@ -237,6 +237,33 @@ async function importVapidSigningKey(keys: VapidKeys): Promise<CryptoKey> {
   );
 }
 
+/**
+ * Whether the private key really belongs to the public key: signs a few bytes with the one and
+ * verifies them with the other. Two well-formed keys of different pairs pass isVapidKeyPair,
+ * and every push service would refuse their messages.
+ */
+export async function isMatchingVapidPair(keys: VapidKeys): Promise<boolean> {
+  const publicKey = base64UrlDecode(keys.publicKey);
+  if (!isVapidKeyPair(keys) || publicKey === null) return false;
+  const algorithm = { name: 'ECDSA', hash: 'SHA-256' };
+  const probe = utf8('stackhush');
+  try {
+    // Some runtimes already refuse to import a private key with another key's coordinates.
+    const signingKey = await importVapidSigningKey(keys);
+    const verifyKey = await crypto.subtle.importKey(
+      'raw',
+      publicKey,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+    const signature = await crypto.subtle.sign(algorithm, signingKey, probe);
+    return await crypto.subtle.verify(algorithm, verifyKey, signature, probe);
+  } catch {
+    return false;
+  }
+}
+
 export interface VapidClaims {
   /** The origin of the push service the message goes to, for example https://push.example. */
   audience: string;
