@@ -118,40 +118,46 @@ export function reviewRequestKey(repo: string, prNumber: number): string {
 interface Phrases {
   problem: TransitionKind;
   recovery: TransitionKind;
-  problemTitle: (subject: string, summary: string) => string;
-  recoveryTitle: (subject: string) => string;
+  problemTitle: (observation: StateObservation) => string;
+  recoveryTitle: (observation: StateObservation) => string;
+}
+
+/** `branch` is only set for CI on a branch other than the default one. */
+function branchPhrase(branch: string | undefined): string {
+  return branch ?? 'the default branch';
 }
 
 const PHRASES: Record<CheckKind, Phrases> = {
   uptime: {
     problem: 'site_down',
     recovery: 'site_up',
-    problemTitle: (subject, summary) => `${subject} is down (${summary})`,
-    recoveryTitle: (subject) => `${subject} is back up`,
+    problemTitle: ({ subject, summary }) => `${subject} is down (${summary})`,
+    recoveryTitle: ({ subject }) => `${subject} is back up`,
   },
   deploy: {
     problem: 'deploy_failed',
     recovery: 'deploy_ok',
-    problemTitle: (subject) => `${subject}: production deploy failed`,
-    recoveryTitle: (subject) => `${subject}: production deploy succeeded`,
+    problemTitle: ({ subject }) => `${subject}: production deploy failed`,
+    recoveryTitle: ({ subject }) => `${subject}: production deploy succeeded`,
   },
   ci: {
     problem: 'ci_red',
     recovery: 'ci_green',
-    problemTitle: (subject) => `${subject}: CI on the default branch went red`,
-    recoveryTitle: (subject) => `${subject}: CI on the default branch is green again`,
+    problemTitle: ({ subject, branch }) => `${subject}: CI on ${branchPhrase(branch)} went red`,
+    recoveryTitle: ({ subject, branch }) =>
+      `${subject}: CI on ${branchPhrase(branch)} is green again`,
   },
   supabase: {
     problem: 'supabase_unhealthy',
     recovery: 'supabase_healthy',
-    problemTitle: (subject, summary) => `${subject}: Supabase project not healthy (${summary})`,
-    recoveryTitle: (subject) => `${subject}: Supabase project is healthy again`,
+    problemTitle: ({ subject, summary }) => `${subject}: Supabase project not healthy (${summary})`,
+    recoveryTitle: ({ subject }) => `${subject}: Supabase project is healthy again`,
   },
   worker: {
     problem: 'worker_errors',
     recovery: 'worker_ok',
-    problemTitle: (subject, summary) => `${subject}: Worker errors over threshold (${summary})`,
-    recoveryTitle: (subject) => `${subject}: Worker errors are back under the threshold`,
+    problemTitle: ({ subject, summary }) => `${subject}: Worker errors over threshold (${summary})`,
+    recoveryTitle: ({ subject }) => `${subject}: Worker errors are back under the threshold`,
   },
 };
 
@@ -314,7 +320,7 @@ function evaluateState(
         projectId: observation.projectId,
         checkKey: observation.checkKey,
         kind: phrases.recovery,
-        title: phrases.recoveryTitle(observation.subject),
+        title: phrases.recoveryTitle(observation),
         linkUrl: observation.linkUrl,
       });
     }
@@ -348,7 +354,7 @@ function evaluateState(
       projectId: observation.projectId,
       checkKey: observation.checkKey,
       kind: phrases.problem,
-      title: phrases.problemTitle(observation.subject, observation.summary),
+      title: phrases.problemTitle(observation),
       linkUrl: observation.linkUrl,
     });
   }

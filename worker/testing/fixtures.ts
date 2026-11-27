@@ -131,6 +131,28 @@ export function workflowRunsBody(runs: FixtureRun[]): unknown {
   };
 }
 
+export interface FixtureRecentRun extends FixtureRun {
+  branch: string;
+  /** The head commit; 'sha-<branch>' when left out. */
+  sha?: string;
+  /** The repo the run's branch lives in; a fork's name for a pull request from a fork. */
+  headRepo?: string;
+}
+
+/** The answer to the list of a repo's recent runs on every branch, newest first. */
+export function recentRunsBody(repo: string, runs: FixtureRecentRun[]): unknown {
+  const body = workflowRunsBody(runs) as { workflow_runs: Record<string, unknown>[] };
+  return {
+    ...body,
+    workflow_runs: body.workflow_runs.map((run, index) => ({
+      ...run,
+      head_branch: runs[index]?.branch,
+      head_sha: runs[index]?.sha ?? `sha-${runs[index]?.branch}`,
+      head_repository: { full_name: runs[index]?.headRepo ?? repo },
+    })),
+  };
+}
+
 export function supabaseBody(): unknown {
   return [
     {

@@ -17,11 +17,19 @@ export interface CheckView {
   linkUrl: string | null;
 }
 
+/** What the Actions runs on a pull request's head commit say. */
+export type PullRequestChecks = 'passing' | 'failing' | 'running';
+
 export interface PullRequestView {
   number: number;
   title: string;
   url: string;
   isReviewRequestedFromMe: boolean;
+  /**
+   * Only for a repo that shows pull request checks, and only while runs on the PR's head commit
+   * are among the repo's recent runs. Information for the row; never a problem or an alert.
+   */
+  checks?: PullRequestChecks;
 }
 
 export interface ProjectView {
@@ -31,6 +39,8 @@ export interface ProjectView {
   sites: CheckView[];
   deploy: CheckView | null;
   ci: CheckView | null;
+  /** CI of the extra branches of the config, one row each; left out when there are none. */
+  branchCi?: CheckView[];
   pullRequests: PullRequestView[] | null;
   supabase: CheckView | null;
   /** One per Cloudflare Worker script. */

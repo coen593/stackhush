@@ -7,7 +7,10 @@
 // and PRs, then one REST call per repo (plus, rarely, a lookup of a workflow that is held red
 // and has no recent runs). The default branch comes from the config: reading it
 // from the API needs Contents permission, which the tokens do not have.
+// A repo that watches extra branches or shows the checks of its pull requests gets one more
+// REST call: its recent runs on every branch, which answers both.
 
+import type { PullRequestChecks } from '../../shared/api.ts';
 import type {
   Observation,
   PullRequestObservation,
@@ -18,6 +21,7 @@ import {
   githubLabel,
   githubSource,
   MAX_WORKFLOW_LOOKUPS,
+  needsRecentRuns,
   type GitHubOwner,
   type Project,
 } from '../config.ts';
@@ -38,17 +42,45 @@ const GRAPHQL_URL = 'https://api.github.com/graphql';
 const MAX_DEPLOYMENTS = 30;
 const MAX_PULL_REQUESTS = 30;
 const MAX_WORKFLOW_RUNS = 15;
+/** The most one call returns. See docs/limits.md for what happens to runs beyond it. */
+const MAX_RECENT_RUNS = 100;
 const CI_CHECK_KEY = 'ci';
 const DEPLOY_CHECK_KEY = 'deploy';
+
+/** The check key of an extra branch's CI. The default branch keeps 'ci'. */
+export function branchCiCheckKey(branch: string): string {
+  return `${CI_CHECK_KEY}:${branch}`;
+}
+
+/** Which CI check an observation is for. */
+export interface CiCheck {
+  checkKey: string;
+  label: string;
+  /** Only for an extra branch. */
+  branch?: string;
+}
+
+const DEFAULT_BRANCH_CI: CiCheck = { checkKey: CI_CHECK_KEY, label: 'CI' };
+
+/** A branch whose CI is watched, with what the last run stored for it. */
+interface WatchedBranch {
+  name: string;
+  check: CiCheck;
+  /** Empty unless something was failing. */
+  failingWorkflows: FailingWorkflow[];
+  goneWorkflows: GoneWorkflow[];
+}
 
 interface WatchedRepo {
   project: Project;
   fullName: string;
-  defaultBranch: string;
+  defaultBranch: WatchedBranch;
+  /** The extra branches of the config, in its order. */
+  extraBranches: WatchedBranch[];
+  pullRequestChecks: boolean;
+  /** Whether the call for the recent runs on every branch is made. */
+  needsRecentRuns: boolean;
   watchDeployments: boolean;
-  /** What the last run stored: empty unless something was failing. */
-  failingWorkflows: FailingWorkflow[];
-  goneWorkflows: GoneWorkflow[];
   failingEnvironments: FailingEnvironment[];
   /** Whether a Deploy check is stored for the repo. */
   hasDeployCheck: boolean;
@@ -69,6 +101,15 @@ export interface WorkflowRun {
   conclusion: string | null;
   url: string;
   createdAt: string;
+}
+
+/** A run from the list of every branch, with what tells the branches and commits apart. */
+export interface RecentRun extends WorkflowRun {
+  /** Null when the run's branch is not known (GitHub's schema allows it). */
+  headBranch: string | null;
+  headSha: string;
+  /** False for a run of a pull request from a fork, whose branch may share a name with ours. */
+  isOwnRepo: boolean;
 }
 
 /**
@@ -110,6 +151,8 @@ interface RepoSnapshot {
    */
   heldDeployments: Deployment[];
   pullRequests: PullRequestObservation[];
+  /** PR number -> head commit, for a repo that shows pull request checks; otherwise empty. */
+  headShas: ReadonlyMap<number, string>;
 }
 
 /** What the batched query said about one repo: its data, or a short reason why there is none. */
@@ -139,24 +182,37 @@ export async function fetchGitHub(
   const label = githubLabel(owner);
   const detailOf = (project: Project, checkKey: string): Record<string, unknown> =>
     previous.get(checkStateKey(project.id, checkKey))?.detail ?? {};
-  const repos: WatchedRepo[] = projects.flatMap((project) =>
-    project.github?.ownerKey === owner.key
-      ? [
-          {
-            project,
-            fullName: project.github.fullName,
-            defaultBranch: project.github.defaultBranch,
-            watchDeployments: project.github.watchDeployments,
-            failingWorkflows: readFailingWorkflows(detailOf(project, CI_CHECK_KEY)['failing']),
-            goneWorkflows: readGoneWorkflows(detailOf(project, CI_CHECK_KEY)['gone']),
-            failingEnvironments: project.github.watchDeployments
-              ? readFailingEnvironments(detailOf(project, DEPLOY_CHECK_KEY)['failing'])
-              : [],
-            hasDeployCheck: previous.has(checkStateKey(project.id, DEPLOY_CHECK_KEY)),
-          },
-        ]
-      : [],
-  );
+  const watchBranch = (project: Project, name: string, check: CiCheck): WatchedBranch => ({
+    name,
+    check,
+    failingWorkflows: readFailingWorkflows(detailOf(project, check.checkKey)['failing']),
+    goneWorkflows: readGoneWorkflows(detailOf(project, check.checkKey)['gone']),
+  });
+  const repos: WatchedRepo[] = projects.flatMap((project) => {
+    const repo = project.github;
+    if (repo?.ownerKey !== owner.key) return [];
+    return [
+      {
+        project,
+        fullName: repo.fullName,
+        defaultBranch: watchBranch(project, repo.defaultBranch, DEFAULT_BRANCH_CI),
+        extraBranches: repo.extraBranches.map((branch) =>
+          watchBranch(project, branch, {
+            checkKey: branchCiCheckKey(branch),
+            label: `CI (${branch})`,
+            branch,
+          }),
+        ),
+        pullRequestChecks: repo.pullRequestChecks,
+        needsRecentRuns: needsRecentRuns(repo),
+        watchDeployments: repo.watchDeployments,
+        failingEnvironments: repo.watchDeployments
+          ? readFailingEnvironments(detailOf(project, DEPLOY_CHECK_KEY)['failing'])
+          : [],
+        hasDeployCheck: previous.has(checkStateKey(project.id, DEPLOY_CHECK_KEY)),
+      },
+    ];
+  });
   const result: SourceResult = { source, label, error: null, observations: [] };
   if (repos.length === 0) return result;
 
@@ -180,9 +236,9 @@ export async function fetchGitHub(
   const errors: string[] = [];
   repos.forEach((repo, index) => {
     const answer = answers[index] ?? { snapshot: null, error: NOT_ACCESSIBLE };
-    const ci = ciResults[index] ?? { observation: null, error: null };
-    result.observations.push(...snapshotObservations(repo, answer.snapshot));
-    if (ci.observation) result.observations.push(ci.observation);
+    const ci = ciResults[index] ?? { observations: [], error: null, recentRuns: null };
+    result.observations.push(...snapshotObservations(repo, answer.snapshot, ci.recentRuns));
+    result.observations.push(...ci.observations);
     const error = answer.error ?? ci.error;
     if (error !== null) errors.push(`${repo.fullName}: ${error}`);
   });
@@ -196,8 +252,16 @@ function summarizeErrors(errors: readonly string[]): string | null {
   return errors.length === 1 ? first : `${first} (and ${errors.length - 1} more)`;
 }
 
-/** What the GraphQL answer says about one repo: its open PRs and, if watched, its deploys. */
-function snapshotObservations(repo: WatchedRepo, snapshot: RepoSnapshot | null): Observation[] {
+/**
+ * What the GraphQL answer says about one repo: its open PRs and, if watched, its deploys.
+ * `recentRuns` (null when they were not asked for or could not be read) adds to each PR what
+ * the runs on its head commit say.
+ */
+function snapshotObservations(
+  repo: WatchedRepo,
+  snapshot: RepoSnapshot | null,
+  recentRuns: readonly RecentRun[] | null,
+): Observation[] {
   if (!snapshot) return [];
   const observations: Observation[] = [
     {
@@ -205,7 +269,7 @@ function snapshotObservations(repo: WatchedRepo, snapshot: RepoSnapshot | null):
       projectId: repo.project.id,
       projectName: repo.project.name,
       repo: repo.fullName,
-      pullRequests: snapshot.pullRequests,
+      pullRequests: withChecks(snapshot.pullRequests, snapshot.headShas, recentRuns ?? []),
     },
   ];
   if (!repo.watchDeployments) return observations;
@@ -227,21 +291,54 @@ function snapshotObservations(repo: WatchedRepo, snapshot: RepoSnapshot | null):
 }
 
 interface CiResult {
-  observation: StateObservation | null;
-  /** Why CI could not be checked for this repo; the stored row then stays as it is. */
+  /** The default branch's CI and that of each extra branch, as far as they could be checked. */
+  observations: StateObservation[];
+  /** Why CI could not be checked for this repo; the stored rows then stay as they are. */
+  error: string | null;
+  /** The repo's recent runs on every branch; null when not asked for or not readable. */
+  recentRuns: RecentRun[] | null;
+}
+
+/** One watched branch of one repo with the runs listed for it this run. */
+interface CiTarget {
+  repoIndex: number;
+  repo: WatchedRepo;
+  branch: WatchedBranch;
+  /** 0 for the default branch, then the extra branches in the config's order. */
+  position: number;
+  /** Null when the call that lists them failed. */
+  runs: readonly WorkflowRun[] | null;
   error: string | null;
 }
 
+type Fetched<T> = { runs: T[]; error: null } | { runs: null; error: string };
+
+async function attempt<T>(fetchRuns: () => Promise<T[]>): Promise<Fetched<T>> {
+  try {
+    return { runs: await fetchRuns(), error: null };
+  } catch (caught) {
+    return { runs: null, error: safeErrorMessage(caught) };
+  }
+}
+
 /**
- * The CI observation of every repo, in the order of `repos`. The Actions calls do not depend on
+ * The CI observations of every repo, in the order of `repos`. The Actions calls do not depend on
  * the GraphQL answer, so CI is checked even for a repo GraphQL had an error for.
+ *
+ * The default branch has a call of its own, filtered to that branch. Extra branches are read
+ * from one more call, the repo's recent runs on every branch, and judged by the same rules. On a
+ * busy repo an extra branch's runs can scroll out of that list: what was failing is held (it is
+ * remembered per branch), and a branch with nothing listed is reported as unknown, which keeps
+ * its stored state. So scrolling out never turns a branch green and never removes its row.
  *
  * A failing workflow with no run newer than its failure would stay red for good if it was
  * deleted or switched off, since no newer success can ever come. So those are looked up, and one
  * that is gone (404) or no longer active is left out, together with its runs. It is remembered
  * as gone while its runs are still listed, so it is not judged (or looked up) again next run.
  * Which workflows get one of the few lookups is decided only after every repo's runs are in, in
- * a fixed order (repo name, then workflow id), whichever call answers first.
+ * a fixed order (default branches first, by repo name, then workflow id; then extra branches),
+ * whichever call answers first. A workflow failing on several branches of a repo is looked up
+ * once.
  */
 async function observeCi(
   fetcher: Fetcher,
@@ -250,84 +347,162 @@ async function observeCi(
 ): Promise<CiResult[]> {
   const fetched = await Promise.all(
     repos.map(async (repo) => {
-      try {
-        return {
-          runs: await fetchWorkflowRuns(fetcher, token, repo.fullName, repo.defaultBranch),
-          error: null,
-        };
-      } catch (caught) {
-        return { runs: null, error: safeErrorMessage(caught) };
-      }
+      const [defaultBranch, recent] = await Promise.all([
+        attempt(() => fetchWorkflowRuns(fetcher, token, repo.fullName, repo.defaultBranch.name)),
+        repo.needsRecentRuns ? attempt(() => fetchRecentRuns(fetcher, token, repo.fullName)) : null,
+      ]);
+      return { defaultBranch, recent };
     }),
   );
 
-  // Per repo: the workflows known to be gone. Starts from what was stored, minus the ones that
+  const targets: CiTarget[] = repos.flatMap((repo, repoIndex) => {
+    const answer = fetched[repoIndex];
+    if (!answer) return [];
+    const { defaultBranch, recent } = answer;
+    return [
+      { repoIndex, repo, branch: repo.defaultBranch, position: 0, ...defaultBranch },
+      ...repo.extraBranches.map((branch, index) => ({
+        repoIndex,
+        repo,
+        branch,
+        position: index + 1,
+        runs:
+          recent?.runs?.filter((run) => run.isOwnRepo && run.headBranch === branch.name) ?? null,
+        error: recent?.error ?? null,
+      })),
+    ];
+  });
+
+  // Per target: the workflows known to be gone. Starts from what was stored, minus the ones that
   // have no listed runs any more (nothing left to leave out) or that ran again (they are back).
-  const gone = repos.map((repo, repoIndex) => {
-    const runs = fetched[repoIndex]?.runs ?? [];
-    return repo.goneWorkflows.filter((workflow) => {
+  const gone = targets.map((target) => {
+    const runs = target.runs ?? [];
+    return target.branch.goneWorkflows.filter((workflow) => {
       const own = runs.filter((run) => run.workflowId === workflow.workflowId);
       return own.length > 0 && own.every((run) => run.createdAt <= workflow.at);
     });
   });
-  const observe = (repoIndex: number, repo: WatchedRepo, runs: readonly WorkflowRun[]) => {
-    const goneIds = new Set((gone[repoIndex] ?? []).map((workflow) => workflow.workflowId));
+  const observe = (targetIndex: number, target: CiTarget, runs: readonly WorkflowRun[]) => {
+    const goneIds = new Set((gone[targetIndex] ?? []).map((workflow) => workflow.workflowId));
     return ciObservation(
-      repo.project,
+      target.repo.project,
       runs.filter((run) => !goneIds.has(run.workflowId)),
-      repo.failingWorkflows.filter((workflow) => !goneIds.has(workflow.workflowId)),
+      target.branch.failingWorkflows.filter((workflow) => !goneIds.has(workflow.workflowId)),
+      target.branch.check,
     );
   };
 
-  const candidates: { repoIndex: number; fullName: string; workflowId: number }[] = [];
-  repos.forEach((repo, repoIndex) => {
-    const runs = fetched[repoIndex]?.runs;
+  const candidates: { targetIndex: number; target: CiTarget; workflowId: number }[] = [];
+  targets.forEach((target, targetIndex) => {
+    const { runs } = target;
     if (!runs) return;
-    const observation = observe(repoIndex, repo, runs);
+    const observation = observe(targetIndex, target, runs);
     for (const workflow of readFailingWorkflows(observation?.memory?.['failing'])) {
       const hasNewerRun = runs.some(
         (run) => run.workflowId === workflow.workflowId && run.createdAt > workflow.at,
       );
-      if (!hasNewerRun) {
-        candidates.push({ repoIndex, fullName: repo.fullName, workflowId: workflow.workflowId });
-      }
+      if (!hasNewerRun) candidates.push({ targetIndex, target, workflowId: workflow.workflowId });
     }
   });
+  const isExtra = (target: CiTarget) => (target.position > 0 ? 1 : 0);
   candidates.sort(
-    (a, b) => a.fullName.localeCompare(b.fullName, 'en') || a.workflowId - b.workflowId,
+    (a, b) =>
+      isExtra(a.target) - isExtra(b.target) ||
+      a.target.repo.fullName.localeCompare(b.target.repo.fullName, 'en') ||
+      a.target.position - b.target.position ||
+      a.workflowId - b.workflowId,
   );
+  // One lookup answers for every branch of the repo that asks about the workflow.
+  const lookups = new Map<string, typeof candidates>();
+  for (const candidate of candidates) {
+    const key = `${candidate.target.repo.fullName}#${candidate.workflowId}`;
+    lookups.set(key, [...(lookups.get(key) ?? []), candidate]);
+  }
 
-  const lookupErrors = repos.map((): string | null => null);
+  const lookupErrors = targets.map((): string | null => null);
   await Promise.all(
-    candidates.slice(0, MAX_WORKFLOW_LOOKUPS).map(async ({ repoIndex, fullName, workflowId }) => {
+    [...lookups.values()].slice(0, MAX_WORKFLOW_LOOKUPS).map(async (askers) => {
+      const [first] = askers;
+      if (!first) return;
+      const { workflowId } = first;
       try {
-        if (await isWorkflowActive(fetcher, token, fullName, workflowId)) return;
-        const runs = fetched[repoIndex]?.runs ?? [];
-        const newest = runs
-          .filter((run) => run.workflowId === workflowId)
-          .map((run) => run.createdAt)
-          .sort()
-          .at(-1);
-        // Without listed runs there is nothing to leave out later; '' keeps it out this run only.
-        gone[repoIndex]?.push({ workflowId, at: newest ?? '' });
+        if (await isWorkflowActive(fetcher, token, first.target.repo.fullName, workflowId)) return;
+        for (const { targetIndex, target } of askers) {
+          const newest = (target.runs ?? [])
+            .filter((run) => run.workflowId === workflowId)
+            .map((run) => run.createdAt)
+            .sort()
+            .at(-1);
+          // Without listed runs there is nothing to leave out later; '' keeps it out this run
+          // only.
+          gone[targetIndex]?.push({ workflowId, at: newest ?? '' });
+        }
       } catch (caught) {
-        lookupErrors[repoIndex] ??= safeErrorMessage(caught);
+        for (const { targetIndex } of askers) {
+          lookupErrors[targetIndex] ??= safeErrorMessage(caught);
+        }
       }
     }),
   );
 
-  return repos.map((repo, repoIndex): CiResult => {
-    const runs = fetched[repoIndex]?.runs;
-    const error = fetched[repoIndex]?.error ?? lookupErrors[repoIndex] ?? null;
-    if (!runs || error !== null) return { observation: null, error };
-    const remembered = (gone[repoIndex] ?? [])
+  const results = repos.map((_, repoIndex): CiResult => {
+    const recent = fetched[repoIndex]?.recent;
+    return { observations: [], error: null, recentRuns: recent?.runs ?? null };
+  });
+  repos.forEach((repo, repoIndex) => {
+    // Never an error of the source: nothing about pull request checks may raise an alert.
+    if (repo.extraBranches.length === 0 && typeof fetched[repoIndex]?.recent?.error === 'string') {
+      console.error('Recent runs could not be read; pull request checks left out this run');
+    }
+  });
+  targets.forEach((target, targetIndex) => {
+    const result = results[target.repoIndex];
+    if (!result) return;
+    const error = target.error ?? lookupErrors[targetIndex] ?? null;
+    if (!target.runs || error !== null) {
+      result.error ??= error;
+      return;
+    }
+    const remembered = (gone[targetIndex] ?? [])
       .filter((workflow) => workflow.at !== '')
       .sort((a, b) => a.workflowId - b.workflowId);
-    return {
-      observation: rememberGone(repo.project, observe(repoIndex, repo, runs), remembered),
-      error: null,
-    };
+    const observation =
+      rememberGone(target, observe(targetIndex, target, target.runs), remembered) ??
+      noRecentRuns(target);
+    if (observation) result.observations.push(observation);
   });
+  return results;
+}
+
+/**
+ * What an extra branch reports when none of its runs are among the repo's recent ones and
+ * nothing is failing: unknown, so a stored row keeps its state and is not taken for a branch
+ * that left the config. Except when it was red and every failing workflow was just found gone:
+ * then nothing holds it red any more, and it is ok.
+ * The default branch reports nothing in either case, as it always has: its own call lists its
+ * runs however busy the repo is, so an empty list means it has none.
+ */
+function noRecentRuns({ repo, branch }: CiTarget): StateObservation | null {
+  if (branch.check.branch === undefined) return null;
+  const base = {
+    type: 'state' as const,
+    projectId: repo.project.id,
+    ...branch.check,
+    kind: 'ci' as const,
+    subject: repo.project.name,
+    linkUrl: null,
+    at: null,
+    failuresToProblem: 1,
+  };
+  if (branch.failingWorkflows.length > 0) {
+    return {
+      ...base,
+      status: 'ok',
+      summary: 'No finished runs of an active workflow',
+      memory: { failing: [] },
+    };
+  }
+  return { ...base, status: 'unknown', summary: 'No recent runs' };
 }
 
 /**
@@ -336,7 +511,7 @@ async function observeCi(
  * check is reported as ok rather than dropped or left unknown.
  */
 function rememberGone(
-  project: Project,
+  { repo, branch }: CiTarget,
   observation: StateObservation | null,
   gone: readonly GoneWorkflow[],
 ): StateObservation | null {
@@ -346,11 +521,10 @@ function rememberGone(
   }
   return {
     type: 'state',
-    projectId: project.id,
-    checkKey: CI_CHECK_KEY,
+    projectId: repo.project.id,
+    ...branch.check,
     kind: 'ci',
-    subject: project.name,
-    label: 'CI',
+    subject: repo.project.name,
     status: 'ok',
     summary: 'No finished runs of an active workflow',
     linkUrl: null,
@@ -386,12 +560,19 @@ async function isWorkflowActive(
 const DEPLOYMENT_FIELDS = 'nodes { environment createdAt latestStatus { state logUrl } }';
 const NEWEST_FIRST = 'orderBy: { field: CREATED_AT, direction: DESC }';
 
-type QueriedRepo = Pick<WatchedRepo, 'fullName' | 'failingEnvironments'>;
+type QueriedRepo = Pick<WatchedRepo, 'fullName' | 'failingEnvironments'> &
+  Partial<Pick<WatchedRepo, 'pullRequestChecks'>>;
+
+/** The alias of the field that reads the head commit of each open PR. */
+const HEADS_ALIAS = 'heads';
+const OPEN_PULL_REQUESTS = `pullRequests(states: OPEN, first: ${MAX_PULL_REQUESTS}, orderBy: { field: UPDATED_AT, direction: DESC })`;
 
 /**
  * One aliased block per repo. Owner, name and environment names travel as variables, never
  * spliced into the query text. A repo with failing environments also gets one extra field per
- * environment for its newest deployment, in this same call.
+ * environment for its newest deployment, in this same call, and a repo that shows pull request
+ * checks one for the head commits of its open PRs. That one is a field of its own, so that a
+ * token that may not read it loses the checks and not the PRs.
  */
 export function buildQuery(repos: readonly QueriedRepo[]): string {
   const variables: string[] = [];
@@ -401,7 +582,10 @@ export function buildQuery(repos: readonly QueriedRepo[]): string {
       variables.push(`$env${index}_${envIndex}: String!`);
       return ` held${envIndex}: deployments(first: 1, environments: [$env${index}_${envIndex}], ${NEWEST_FIRST}) { ${DEPLOYMENT_FIELDS} }`;
     });
-    return `repo${index}: repository(owner: $owner${index}, name: $name${index}) { ...Watched${held.join('')} }`;
+    const heads = repo.pullRequestChecks
+      ? ` ${HEADS_ALIAS}: ${OPEN_PULL_REQUESTS} { nodes { number headRefOid } }`
+      : '';
+    return `repo${index}: repository(owner: $owner${index}, name: $name${index}) { ...Watched${held.join('')}${heads} }`;
   });
   return `query(${variables.join(', ')}) {
   ${aliases.join('\n  ')}
@@ -410,7 +594,7 @@ fragment Watched on Repository {
   deployments(first: ${MAX_DEPLOYMENTS}, ${NEWEST_FIRST}) {
     ${DEPLOYMENT_FIELDS}
   }
-  pullRequests(states: OPEN, first: ${MAX_PULL_REQUESTS}, orderBy: { field: UPDATED_AT, direction: DESC }) {
+  ${OPEN_PULL_REQUESTS} {
     nodes {
       number title url
       reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } } } }
@@ -441,7 +625,8 @@ const REPO_ALIAS_PATTERN = /^repo\d+$/;
  * Parses the batched response. GraphQL answers 200 with an `errors` array when something could
  * not be read, and every entry counts: one whose path starts at a repo alias is that repo's
  * error (the token cannot see the repo, or lacks a permission for one of its fields); any other
- * fails the whole call.
+ * fails the whole call. The one exception is the field for pull request checks: an error there
+ * only means no checks are shown, because nothing about those may ever raise an alert.
  */
 export function parseGitHubGraphql(
   body: unknown,
@@ -460,6 +645,7 @@ export function parseGitHubGraphql(
     if (typeof alias !== 'string' || !REPO_ALIAS_PATTERN.test(alias)) {
       throw new SourceError(`GraphQL ${reason}`);
     }
+    if (Array.isArray(path) && path[1] === HEADS_ALIAS) continue;
     if (!repoErrors.has(alias)) repoErrors.set(alias, `GraphQL ${reason}`);
   }
 
@@ -489,7 +675,22 @@ function parseRepo(
       nodesOf(repo[`held${envIndex}`]).map(parseDeployment),
     ).flat(),
     pullRequests: nodesOf(repo['pullRequests']).map((node) => parsePullRequest(node, myLogins)),
+    headShas: parseHeadShas(repo[HEADS_ALIAS]),
   };
+}
+
+/** Lenient on purpose: whatever is missing or malformed only means no checks for that PR. */
+function parseHeadShas(connection: unknown): Map<number, string> {
+  const headShas = new Map<number, string>();
+  const nodes = isRecord(connection) ? connection['nodes'] : null;
+  for (const node of Array.isArray(nodes) ? (nodes as unknown[]) : []) {
+    if (!isRecord(node)) continue;
+    const { number, headRefOid } = node;
+    if (typeof number === 'number' && typeof headRefOid === 'string') {
+      headShas.set(number, headRefOid);
+    }
+  }
+  return headShas;
 }
 
 function nodesOf(connection: unknown): unknown[] {
@@ -659,16 +860,56 @@ async function fetchWorkflowRuns(
 }
 
 export function parseWorkflowRuns(body: unknown): WorkflowRun[] {
+  return readArray(readRecord(body), 'workflow_runs').map((item) =>
+    parseWorkflowRun(readRecord(item)),
+  );
+}
+
+function parseWorkflowRun(run: Record<string, unknown>): WorkflowRun {
+  return {
+    id: readNumber(run, 'id'),
+    workflowId: readNumber(run, 'workflow_id'),
+    name: readString(run, 'name'),
+    status: readString(run, 'status'),
+    conclusion: typeof run['conclusion'] === 'string' ? run['conclusion'] : null,
+    url: readString(run, 'html_url'),
+    createdAt: readString(run, 'created_at'),
+  };
+}
+
+/**
+ * The repo's most recent runs whatever their branch or trigger, newest first: one call that
+ * serves every extra branch and every pull request. `exclude_pull_requests` only leaves the
+ * list of pull requests out of each run (a smaller answer); runs of pull requests are included.
+ */
+async function fetchRecentRuns(
+  fetcher: Fetcher,
+  token: string,
+  repo: string,
+): Promise<RecentRun[]> {
+  const query = new URLSearchParams({
+    exclude_pull_requests: 'true',
+    per_page: String(MAX_RECENT_RUNS),
+  });
+  const body = await fetchJson(
+    fetcher,
+    `https://api.github.com/repos/${repo}/actions/runs?${query.toString()}`,
+    { headers: authHeaders(token) },
+  );
+  return parseRecentRuns(body, repo);
+}
+
+export function parseRecentRuns(body: unknown, repo: string): RecentRun[] {
   return readArray(readRecord(body), 'workflow_runs').map((item) => {
     const run = readRecord(item);
+    const headRepository = run['head_repository'];
+    const headRepo = isRecord(headRepository) ? headRepository['full_name'] : null;
     return {
-      id: readNumber(run, 'id'),
-      workflowId: readNumber(run, 'workflow_id'),
-      name: readString(run, 'name'),
-      status: readString(run, 'status'),
-      conclusion: typeof run['conclusion'] === 'string' ? run['conclusion'] : null,
-      url: readString(run, 'html_url'),
-      createdAt: readString(run, 'created_at'),
+      ...parseWorkflowRun(run),
+      headBranch: typeof run['head_branch'] === 'string' ? run['head_branch'] : null,
+      headSha: readString(run, 'head_sha'),
+      // GitHub names do not differ by case.
+      isOwnRepo: typeof headRepo === 'string' && headRepo.toLowerCase() === repo.toLowerCase(),
     };
   });
 }
@@ -706,16 +947,18 @@ export function readGoneWorkflows(stored: unknown): GoneWorkflow[] {
 const RED_CONCLUSIONS: readonly string[] = ['failure', 'timed_out', 'startup_failure'];
 
 /**
- * CI is red while any workflow on the default branch is failing. A workflow is failing when its
+ * CI is red while any workflow on the branch is failing. A workflow is failing when its
  * latest finished run failed; cancelled, skipped and neutral runs say nothing either way. It
  * stays failing until a newer run of that same workflow succeeds, or the failed run itself
  * succeeds on a re-run. So a re-run in progress, or a failed run that scrolled out of the recent
- * runs, does not turn CI green. Null when the repo has no runs and nothing was failing.
+ * runs, does not turn CI green. Null when no runs are listed and nothing was failing.
+ * `check` says which branch's check this is; the default branch's when left out.
  */
 export function ciObservation(
   project: Project,
   runs: readonly WorkflowRun[],
   previousFailing: readonly FailingWorkflow[],
+  check: CiCheck = DEFAULT_BRANCH_CI,
 ): StateObservation | null {
   if (runs.length === 0 && previousFailing.length === 0) return null;
   const newestFirst = [...runs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -750,10 +993,9 @@ export function ciObservation(
   const base = {
     type: 'state' as const,
     projectId: project.id,
-    checkKey: CI_CHECK_KEY,
+    ...check,
     kind: 'ci' as const,
     subject: project.name,
-    label: 'CI',
     failuresToProblem: 1,
     memory: { failing },
   };
@@ -779,4 +1021,44 @@ export function ciObservation(
 
 function isRed(conclusion: string | null): boolean {
   return conclusion !== null && RED_CONCLUSIONS.includes(conclusion);
+}
+
+// Pull request checks -------------------------------------------------------------------------
+
+/**
+ * What the Actions runs on one commit say, by the newest run of each workflow there: failing if
+ * any failed, else running if any has not finished, else passing if any succeeded. Null when
+ * there is nothing to say: no run on the commit among the recent ones, or only cancelled,
+ * skipped and neutral ones.
+ */
+export function commitChecks(
+  headSha: string,
+  recentRuns: readonly RecentRun[],
+): PullRequestChecks | null {
+  const newestFirst = recentRuns
+    .filter((run) => run.headSha === headSha)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const latestByWorkflow = new Map<number, RecentRun>();
+  for (const run of newestFirst) {
+    if (!latestByWorkflow.has(run.workflowId)) latestByWorkflow.set(run.workflowId, run);
+  }
+  const latest = [...latestByWorkflow.values()];
+  if (latest.some((run) => run.status === 'completed' && isRed(run.conclusion))) return 'failing';
+  if (latest.some((run) => run.status !== 'completed')) return 'running';
+  if (latest.some((run) => run.conclusion === 'success')) return 'passing';
+  return null;
+}
+
+/** Adds `checks` to the PRs it is known for. The others are returned exactly as they came. */
+function withChecks(
+  pullRequests: PullRequestObservation[],
+  headShas: ReadonlyMap<number, string>,
+  recentRuns: readonly RecentRun[],
+): PullRequestObservation[] {
+  if (headShas.size === 0 || recentRuns.length === 0) return pullRequests;
+  return pullRequests.map((pullRequest) => {
+    const headSha = headShas.get(pullRequest.number);
+    const checks = headSha === undefined ? null : commitChecks(headSha, recentRuns);
+    return checks === null ? pullRequest : { ...pullRequest, checks };
+  });
 }

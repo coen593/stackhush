@@ -1,7 +1,7 @@
 // What the sources report each run. Pure data: sources produce it, the transition core turns it
 // into state changes.
 
-import type { CheckStatus } from '../shared/api.ts';
+import type { CheckStatus, PullRequestChecks } from '../shared/api.ts';
 
 export type CheckKind = 'uptime' | 'deploy' | 'ci' | 'supabase' | 'worker';
 
@@ -17,6 +17,8 @@ export interface StateObservation {
   subject: string;
   /** What the dashboard row is about. */
   label: string;
+  /** CI only: the branch, when it is not the default one. Alert titles name it. */
+  branch?: string;
   /** 'unknown' means "could not tell this run": the previous state is kept. */
   status: CheckStatus;
   summary: string;
@@ -43,6 +45,11 @@ export interface PullRequestObservation {
   title: string;
   url: string;
   isReviewRequestedFromMe: boolean;
+  /**
+   * What the Actions runs on the PR's head commit say; only there for a repo that shows pull
+   * request checks, and only when such runs are among the recent ones. Shown, never alerted on.
+   */
+  checks?: PullRequestChecks;
 }
 
 /** The open PRs of one repo. Not a pass/fail check; review requests become transitions. */

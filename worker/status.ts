@@ -20,6 +20,7 @@ import {
 } from './config.ts';
 import { SHORT_KEY, uptimeCheckKey } from './budget.ts';
 import { countSubscriptions } from './push.ts';
+import { branchCiCheckKey } from './sources/github.ts';
 import type { Secrets } from './secrets.ts';
 import { parseDetail } from './store.ts';
 import {
@@ -178,12 +179,26 @@ function buildProject(project: Project, rows: readonly CheckRow[]): ProjectView 
     sites: project.productionUrls.flatMap((url) => view(uptimeCheckKey(url)) ?? []),
     deploy: view('deploy'),
     ci: view('ci'),
+    ...branchCiViews(project, view),
     pullRequests: readPullRequests(byKey.get('prs')),
     supabase: project.supabaseRef ? view(`supabase:${project.supabaseRef}`) : null,
     workers: (project.cloudflare?.scripts ?? []).flatMap(
       (script) => view(`worker:${script}`) ?? [],
     ),
   };
+}
+
+/**
+ * The CI rows of the extra branches, in the config's order. The field is left out for a repo
+ * without any, so the answer for a config that has none is what it always was.
+ */
+function branchCiViews(
+  project: Project,
+  view: (key: string) => CheckView | null,
+): Pick<ProjectView, 'branchCi'> {
+  const branches = project.github?.extraBranches ?? [];
+  if (branches.length === 0) return {};
+  return { branchCi: branches.flatMap((branch) => view(branchCiCheckKey(branch)) ?? []) };
 }
 
 function toCheckView(row: CheckRow): CheckView {
