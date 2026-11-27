@@ -24,6 +24,13 @@ run, from a push or its schedule). The lookup does not happen in two cases:
   that cancelled or skipped run in GitHub (Actions, the run, "Delete workflow run"). It is
   looked up and forgotten on the next run.
 
+**On the default branch, runs from forks count too.** The default branch's CI is read with
+GitHub's `branch=` filter, which also returns runs of pull requests from forks whose own branch
+has the same name (for example a fork's `main`). On a public repo that takes such pull requests,
+a failing fork run can turn the CI row red until a newer run of that workflow succeeds. Private
+repos and repos without fork pull requests are not affected. Extra branches and pull request
+checks already leave fork runs out. A fix for the default branch is planned for a later release.
+
 **An extra branch is read from the repo's 50 most recent runs, and a busy repo can push a
 branch's runs out of them.** The default branch has a request of its own that lists only its
 runs. Extra branches (`extraBranches`) and pull request checks share one request for the repo's
