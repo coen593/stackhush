@@ -138,7 +138,7 @@ a check or a redirect.
 Two optional fields of a project's `github` entry (`worker/config.ts`): `extraBranches` (CI
 watched on more branches, with rows and alerts of their own) and `pullRequestChecks` (passing,
 failing or running on each open PR, dashboard only). A repo with either makes ONE more request
-per run (`needsRecentRuns`, counted by `plannedSubrequests`): its 100 most recent runs on any
+per run (`needsRecentRuns`, counted by `plannedSubrequests`): its 50 most recent runs on any
 branch (`fetchRecentRuns` in `worker/sources/github.ts`), filtered in code by `head_branch` (own
 repo only, not forks) and by `head_sha`. The default branch keeps its own branch-filtered request
 and its check key `ci`, untouched.
@@ -148,12 +148,13 @@ and its check key `ci`, untouched.
   the same `ciObservation`, with `failing` and `gone` in its own row's `detail_json`. The lookups
   of held-red workflows are shared (5 per token): default branches first, one lookup per repo
   and workflow.
-- Scroll-out: when none of a branch's runs are among the 100, the observation is `unknown`
+- Scroll-out: when none of a branch's runs are among the 50, the observation is `unknown`
   ("No recent runs"), which keeps the stored state and keeps the row from being pruned. Never
   return nothing for a configured extra branch whose request worked.
 - PR checks ride on the `pull_requests` observation as `checks` on a PR (absent when not known);
-  head commits come from a separate GraphQL field (`heads`) so an error there loses only the
-  marks. Nothing about them may produce a transition, an event, an email, a push, a problem or a
+  head commits come from a second root block per repo in the same GraphQL call (`heads<N>`),
+  never from inside `repo<N>`: `pullRequests` is non-null, so an error inside a repo's block
+  nulls the whole block. An error on `heads<N>` loses only the marks. Nothing about them may produce a transition, an event, an email, a push, a problem or a
   failing source: a failed recent-runs request is an error of the source only for a repo with
   extra branches.
 - `GET /api/status`: `ProjectView.branchCi` (left out without extra branches) and

@@ -162,25 +162,27 @@ requests; one with only `productionUrls` shows uptime.
 
 ### Extra branches and pull request checks
 
-Both are read from one request: the repo's 100 most recent workflow runs on any branch. So a repo
+Both are read from one request: the repo's 50 most recent workflow runs on any branch. So a repo
 that uses either, or both, makes two requests for its runs instead of one (the default branch
 keeps its own, which only lists that branch), and `defineConfig` counts it that way against
 `subrequestBudget`.
 
 An extra branch follows the rules of the default branch: red when the latest finished run of any
 workflow on that branch failed, and red until a newer run of that workflow on that branch
-succeeds. Runs of pull requests from forks are left out, also when the fork's branch has the same
-name. A branch you add while it is failing alerts on the first run that sees it, like a URL added
+succeeds. A run counts for the branch when the branch is the run's head branch in your repo: a
+push to it, a scheduled or manual run on it, and also a pull request opened from that branch
+(GitHub's own `branch` filter, used for the default branch, counts the same). Runs of pull
+requests from forks are left out, also when the fork's branch has the same name. A branch you add while it is failing alerts on the first run that sees it, like a URL added
 while its site is down. Taking a branch out of the list removes its row (an event on the
 dashboard, no email) in the next run in which GitHub answers.
 
-On a repo with many runs, a branch's runs can fall outside those 100. Nothing is lost that was
+On a repo with many runs, a branch's runs can fall outside those 50. Nothing is lost that was
 known: a red branch stays red, a green one keeps its row, and neither is reported as changed.
 What can be missed is described in [limits.md](limits.md).
 
 Pull request checks need no extra permission: the token already has Pull requests: read (for the
 head commit of each PR) and Actions: read (for the runs). A PR whose head commit has no run among
-those 100, or only cancelled and skipped ones, simply shows no mark.
+those 50, or only cancelled and skipped ones, simply shows no mark.
 
 ## Stored keys
 

@@ -42,8 +42,12 @@ const GRAPHQL_URL = 'https://api.github.com/graphql';
 const MAX_DEPLOYMENTS = 30;
 const MAX_PULL_REQUESTS = 30;
 const MAX_WORKFLOW_RUNS = 15;
-/** The most one call returns. See docs/limits.md for what happens to runs beyond it. */
-const MAX_RECENT_RUNS = 100;
+/**
+ * Half of what one call may return: every run in the answer is about 12 kB of JSON, and parsing
+ * it counts against the 10 ms of CPU a run has on Workers Free. See docs/limits.md for what
+ * happens to runs beyond it.
+ */
+const MAX_RECENT_RUNS = 50;
 const CI_CHECK_KEY = 'ci';
 const DEPLOY_CHECK_KEY = 'deploy';
 
@@ -563,16 +567,22 @@ const NEWEST_FIRST = 'orderBy: { field: CREATED_AT, direction: DESC }';
 type QueriedRepo = Pick<WatchedRepo, 'fullName' | 'failingEnvironments'> &
   Partial<Pick<WatchedRepo, 'pullRequestChecks'>>;
 
-/** The alias of the field that reads the head commit of each open PR. */
-const HEADS_ALIAS = 'heads';
+/**
+ * The head commits of a repo's open PRs are asked for under a root alias of their own, next to
+ * the repo's: GraphQL answers an error inside a repo's block by returning null for the whole
+ * block, and that must never happen to the PRs because of the checks.
+ */
+function headsAlias(index: number): string {
+  return `heads${index}`;
+}
+const HEADS_ALIAS_PATTERN = /^heads\d+$/;
 const OPEN_PULL_REQUESTS = `pullRequests(states: OPEN, first: ${MAX_PULL_REQUESTS}, orderBy: { field: UPDATED_AT, direction: DESC })`;
 
 /**
  * One aliased block per repo. Owner, name and environment names travel as variables, never
  * spliced into the query text. A repo with failing environments also gets one extra field per
- * environment for its newest deployment, in this same call, and a repo that shows pull request
- * checks one for the head commits of its open PRs. That one is a field of its own, so that a
- * token that may not read it loses the checks and not the PRs.
+ * environment for its newest deployment, in this same call. A repo that shows pull request
+ * checks gets a second block for the head commits of its open PRs (see headsAlias).
  */
 export function buildQuery(repos: readonly QueriedRepo[]): string {
   const variables: string[] = [];
@@ -582,10 +592,11 @@ export function buildQuery(repos: readonly QueriedRepo[]): string {
       variables.push(`$env${index}_${envIndex}: String!`);
       return ` held${envIndex}: deployments(first: 1, environments: [$env${index}_${envIndex}], ${NEWEST_FIRST}) { ${DEPLOYMENT_FIELDS} }`;
     });
+    const repository = `repository(owner: $owner${index}, name: $name${index})`;
     const heads = repo.pullRequestChecks
-      ? ` ${HEADS_ALIAS}: ${OPEN_PULL_REQUESTS} { nodes { number headRefOid } }`
+      ? `\n  ${headsAlias(index)}: ${repository} { ${OPEN_PULL_REQUESTS} { nodes { number headRefOid } } }`
       : '';
-    return `repo${index}: repository(owner: $owner${index}, name: $name${index}) { ...Watched${held.join('')}${heads} }`;
+    return `repo${index}: ${repository} { ...Watched${held.join('')} }${heads}`;
   });
   return `query(${variables.join(', ')}) {
   ${aliases.join('\n  ')}
@@ -625,7 +636,7 @@ const REPO_ALIAS_PATTERN = /^repo\d+$/;
  * Parses the batched response. GraphQL answers 200 with an `errors` array when something could
  * not be read, and every entry counts: one whose path starts at a repo alias is that repo's
  * error (the token cannot see the repo, or lacks a permission for one of its fields); any other
- * fails the whole call. The one exception is the field for pull request checks: an error there
+ * fails the whole call. The one exception is the block for pull request checks: an error there
  * only means no checks are shown, because nothing about those may ever raise an alert.
  */
 export function parseGitHubGraphql(
@@ -642,10 +653,10 @@ export function parseGitHubGraphql(
     const reason = typeof type === 'string' && ERROR_TYPE_PATTERN.test(type) ? type : 'error';
     const path = entry['path'];
     const alias: unknown = Array.isArray(path) ? path[0] : undefined;
+    if (typeof alias === 'string' && HEADS_ALIAS_PATTERN.test(alias)) continue;
     if (typeof alias !== 'string' || !REPO_ALIAS_PATTERN.test(alias)) {
       throw new SourceError(`GraphQL ${reason}`);
     }
-    if (Array.isArray(path) && path[1] === HEADS_ALIAS) continue;
     if (!repoErrors.has(alias)) repoErrors.set(alias, `GraphQL ${reason}`);
   }
 
@@ -658,7 +669,10 @@ export function parseGitHubGraphql(
     const repo = data[alias];
     if (!isRecord(repo)) return { snapshot: null, error: NOT_ACCESSIBLE };
     return {
-      snapshot: parseRepo(repo, queried.failingEnvironments.length, myLogins),
+      snapshot: {
+        ...parseRepo(repo, queried.failingEnvironments.length, myLogins),
+        headShas: parseHeadShas(data[headsAlias(index)]),
+      },
       error: null,
     };
   });
@@ -668,20 +682,20 @@ function parseRepo(
   repo: Record<string, unknown>,
   heldCount: number,
   myLogins: readonly string[],
-): RepoSnapshot {
+): Omit<RepoSnapshot, 'headShas'> {
   return {
     deployments: nodesOf(repo['deployments']).map(parseDeployment),
     heldDeployments: Array.from({ length: heldCount }, (_, envIndex) =>
       nodesOf(repo[`held${envIndex}`]).map(parseDeployment),
     ).flat(),
     pullRequests: nodesOf(repo['pullRequests']).map((node) => parsePullRequest(node, myLogins)),
-    headShas: parseHeadShas(repo[HEADS_ALIAS]),
   };
 }
 
 /** Lenient on purpose: whatever is missing or malformed only means no checks for that PR. */
-function parseHeadShas(connection: unknown): Map<number, string> {
+function parseHeadShas(repository: unknown): Map<number, string> {
   const headShas = new Map<number, string>();
+  const connection = isRecord(repository) ? repository['pullRequests'] : null;
   const nodes = isRecord(connection) ? connection['nodes'] : null;
   for (const node of Array.isArray(nodes) ? (nodes as unknown[]) : []) {
     if (!isRecord(node)) continue;
@@ -899,18 +913,29 @@ async function fetchRecentRuns(
   return parseRecentRuns(body, repo);
 }
 
+/**
+ * A run that cannot be read (GitHub sends `name: null` for some) is skipped rather than failing
+ * the whole list: this one answer serves every extra branch and every pull request of the repo.
+ */
 export function parseRecentRuns(body: unknown, repo: string): RecentRun[] {
-  return readArray(readRecord(body), 'workflow_runs').map((item) => {
-    const run = readRecord(item);
-    const headRepository = run['head_repository'];
-    const headRepo = isRecord(headRepository) ? headRepository['full_name'] : null;
-    return {
-      ...parseWorkflowRun(run),
-      headBranch: typeof run['head_branch'] === 'string' ? run['head_branch'] : null,
-      headSha: readString(run, 'head_sha'),
-      // GitHub names do not differ by case.
-      isOwnRepo: typeof headRepo === 'string' && headRepo.toLowerCase() === repo.toLowerCase(),
-    };
+  return readArray(readRecord(body), 'workflow_runs').flatMap((item) => {
+    try {
+      const run = readRecord(item);
+      const headRepository = run['head_repository'];
+      const headRepo = isRecord(headRepository) ? headRepository['full_name'] : null;
+      return [
+        {
+          ...parseWorkflowRun(run),
+          headBranch: typeof run['head_branch'] === 'string' ? run['head_branch'] : null,
+          headSha: readString(run, 'head_sha'),
+          // GitHub names do not differ by case.
+          isOwnRepo: typeof headRepo === 'string' && headRepo.toLowerCase() === repo.toLowerCase(),
+        },
+      ];
+    } catch (error) {
+      if (error instanceof SourceError) return [];
+      throw error;
+    }
   });
 }
 

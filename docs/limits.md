@@ -24,22 +24,25 @@ run, from a push or its schedule). The lookup does not happen in two cases:
   that cancelled or skipped run in GitHub (Actions, the run, "Delete workflow run"). It is
   looked up and forgotten on the next run.
 
-**An extra branch is read from the repo's 100 most recent runs, and a busy repo can push a
+**An extra branch is read from the repo's 50 most recent runs, and a busy repo can push a
 branch's runs out of them.** The default branch has a request of its own that lists only its
 runs. Extra branches (`extraBranches`) and pull request checks share one request for the repo's
-100 most recent runs on any branch, to stay inside the request limit; scheduled workflows and
-runs triggered by issues or comments count among those 100 too. When a branch's runs are no
+50 most recent runs on any branch, to stay inside the request limit; scheduled workflows and
+runs triggered by issues or comments count among those 50 too. When a branch's runs are no
 longer among them:
 
 - A red branch stays red. What was failing is remembered per branch, so nothing is reported as
   green again and the row is never removed. It turns green when a check sees a newer successful
-  run of that workflow on that branch. A success that left the 100 before any check saw it (more
-  than 100 runs within the five minutes between two checks, or while the Worker was not running)
-  does not count: the branch stays red until the next one.
-- A green branch keeps its row and its state. A branch with no run among the 100 since it was
+  run of that workflow on that branch. A success that left the 50 before any check saw it
+  finished does not count: the branch stays red until the next one.
+- A green branch keeps its row and its state. A branch with no run among the 50 since it was
   added shows "No recent runs".
-- A failure can be missed only if it leaves the 100 before any check sees it: more than 100 newer
-  runs in the repo within five minutes.
+- A failure is missed if it leaves the 50 before any check sees it finished. The list is ordered
+  by when a run was created, and a run says nothing until it has finished, so the window is the
+  run's own duration plus up to five minutes (the time to the next check): a failure is missed
+  when 50 or more newer runs are created in the repo within that time. A 20-minute workflow on
+  a repo that starts 50 other runs in 25 minutes can fail unseen. The same goes for the unseen
+  success above, and for the time the Worker was not running.
 - The lookups of deleted workflows (above) are shared: at most 5 per GitHub token per run for all
   branches together, default branches first. A workflow that fails on several branches of a repo
   takes one.
@@ -49,10 +52,19 @@ branches, is still "active" for GitHub: its failure on that branch stays red. Ta
 of `extraBranches`, deploy, and add it back once the failed run is no longer among the repo's
 recent runs.
 
+**The answers GitHub sends cost CPU time, and Workers Free allows 10 ms per run.** Each run in a
+list of workflow runs is about 12 kB of JSON, whatever stackhush uses of it, and reading it is
+most of a cron run's CPU time. The default branch's list (15 runs) is about 0.2 MB per repo; a
+repo with `extraBranches` or `pullRequestChecks` adds one answer of about 0.6 MB (50 runs, which
+is why it is not more). A run that goes over the limit is stopped before it has stored anything:
+no state, no email, and the dashboard's "checked" time stops moving. After turning either feature
+on for a repo, look at the CPU time of the scheduled runs in the Worker's metrics in the
+Cloudflare dashboard, and on Workers Free turn it on for a few repos rather than for all.
+
 **Pull request checks are shown, never alerted on.** With `pullRequestChecks`, each open PR shows
 whether the Actions runs on its head commit are passing, failing or running. A failing PR is not
 a problem on the dashboard, sends no email and no push, and writes no event, whatever happens.
-The mark is there only while runs on the PR's head commit are among the repo's 100 most recent
+The mark is there only while runs on the PR's head commit are among the repo's 50 most recent
 runs; an older PR on a busy repo shows none. If that request fails, or the token may not read the
 head commits, the marks are left out and GitHub is not counted as failing because of it (for a
 repo that also has `extraBranches` the failed request does count: its branches could not be

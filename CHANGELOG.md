@@ -9,14 +9,15 @@
 - Checks on open pull requests: with `github.pullRequestChecks: true` each open PR shows whether
   the Actions runs on its head commit are passing, failing or running, and such PRs are listed
   as rows. Dashboard only: no email, no push, no problem, no event.
-- Either or both cost one more subrequest per run for that repo (its 100 most recent runs on any
+- Either or both cost one more subrequest per run for that repo (its 50 most recent runs on any
   branch). `defineConfig` counts it, so a config that no longer fits its `subrequestBudget` is
   refused at build. A config that uses neither makes the same requests and stores the same rows
   as 0.2.0.
 - `GET /api/status` gains `branchCi` on a project (only when it has extra branches) and `checks`
   on a pull request (only when known).
 - No migration. See [docs/configuration.md](docs/configuration.md#extra-branches-and-pull-request-checks)
-  and [docs/limits.md](docs/limits.md) for what a busy repo can push out of the 100 runs.
+  and [docs/limits.md](docs/limits.md) for what a busy repo can push out of the 50 runs, and for
+  the CPU time each such repo adds on Workers Free.
 
 ## 0.2.0
 

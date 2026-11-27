@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { defineConfig, plannedSubrequests, type Config, type StackhushConfig } from './config.ts';
 import { runChecks } from './run.ts';
 import type { Secrets } from './secrets.ts';
+import { parseRecentRuns } from './sources/github.ts';
 import type { Fetcher } from './sources/http.ts';
 import { loadStatus } from './status.ts';
 import { createTestEnv } from './testing/env.ts';
@@ -107,15 +108,16 @@ function graphqlBody(requestBody: string): unknown {
     deployments: { nodes: [] },
     pullRequests: { nodes: pullRequests },
   };
-  if (!requestBody.includes('heads:')) return { data: { repo0: repo } };
+  if (!requestBody.includes('heads0:')) return { data: { repo0: repo } };
   if (world.headsForbidden) {
+    // GraphQL nulls the whole block an error is in; the repo's own block is another one.
     return {
-      data: { repo0: { ...repo, heads: null } },
-      errors: [{ type: 'FORBIDDEN', path: ['repo0', 'heads'], message: 'denied' }],
+      data: { repo0: repo, heads0: null },
+      errors: [{ type: 'FORBIDDEN', path: ['heads0', 'pullRequests', 'nodes', 0, 'headRefOid'] }],
     };
   }
   const heads = world.pullRequests.map((pr) => ({ number: pr.number, headRefOid: pr.sha }));
-  return { data: { repo0: { ...repo, heads: { nodes: heads } } } };
+  return { data: { repo0: repo, heads0: { pullRequests: { nodes: heads } } } };
 }
 
 const network: Fetcher = (url, init) => {
@@ -225,7 +227,7 @@ describe('CI on an extra branch', () => {
     });
     expect(requests.filter((url) => url.includes('/actions/runs'))).toEqual([
       `https://api.github.com/repos/${REPO}/actions/runs?branch=main&exclude_pull_requests=true&per_page=15`,
-      `https://api.github.com/repos/${REPO}/actions/runs?exclude_pull_requests=true&per_page=100`,
+      `https://api.github.com/repos/${REPO}/actions/runs?exclude_pull_requests=true&per_page=50`,
     ]);
   });
 
@@ -505,6 +507,16 @@ describe('pull request checks', () => {
     expect(project?.branchCi).toBeUndefined();
   });
 
+  it('skips a run it cannot read instead of losing the whole list', () => {
+    const body = recentRunsBody(REPO, [PASSING, on('staging', STAGING_OK)]) as {
+      workflow_runs: Record<string, unknown>[];
+    };
+    body.workflow_runs.unshift({ ...body.workflow_runs[0], id: 99, name: null });
+    const runs = parseRecentRuns(body, REPO);
+    expect(runs.map((run) => run.id)).toEqual([21, 2]);
+    expect(() => parseRecentRuns({ message: 'Not Found' }, REPO)).toThrow('invalid response');
+  });
+
   it('leaves a PR without runs on its head commit, or with only cancelled ones, unmarked', async () => {
     world.recentRuns = [
       on('other', finished('cancelled', 22, '2026-11-26T11:00:00Z'), 'bbb222'),
@@ -574,12 +586,19 @@ describe('pull request checks', () => {
 
   it('shows no checks when the token may not read the head commits, and keeps the PRs', async () => {
     world.headsForbidden = true;
+    world.pullRequests = [
+      { number: 7, sha: 'aaa111', isReviewRequested: true },
+      ...world.pullRequests.slice(1),
+    ];
     for (let run = 0; run < 4; run += 1) await runOnce(WITH_PR_CHECKS);
     expect(prChecks()).toEqual([
       [7, undefined],
       [8, undefined],
       [9, undefined],
     ]);
+    // The repo's own block is intact: its PRs and its CI are read as ever.
+    expect(check('prs')?.summary).toBe('3 open, 1 need your review');
+    expect(check('ci')?.status).toBe('ok');
     expect(sourceFailures()).toBe(0);
     expect(events()).toEqual([]);
   });
@@ -594,7 +613,10 @@ describe('pull request checks', () => {
     expect(bodies.join('')).not.toContain('headRefOid');
     expect(requests.filter((url) => url.includes('/actions/runs'))).toHaveLength(1);
     await runChecks(env, new Date(START + RUN_INTERVAL_MS), WITH_PR_CHECKS, recording);
-    expect(bodies.join('')).toContain('heads: pullRequests(states: OPEN');
+    // Under a root alias of its own, never inside the repo's block.
+    expect(bodies.join('')).toContain(
+      'repo0: repository(owner: $owner0, name: $name0) { ...Watched }\\n  heads0: repository(owner: $owner0, name: $name0) { pullRequests(states: OPEN',
+    );
   });
 });
 
