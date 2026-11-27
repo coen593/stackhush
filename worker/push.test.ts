@@ -610,7 +610,7 @@ describe('GET /api/status', () => {
 
   it('gives the public key to subscribe with, and never the private one', async () => {
     const response = await status();
-    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, devices: 0 });
+    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, keys: 'ready', devices: 0 });
     expect(JSON.stringify(response)).not.toContain(vapid.privateKey);
     expect(response.problems).toEqual([]);
   });
@@ -619,7 +619,7 @@ describe('GET /api/status', () => {
     env = { ...env, VAPID_PUBLIC_KEY: undefined, VAPID_PRIVATE_KEY: undefined };
     await devices('phone');
     const response = await status();
-    expect(response.push).toEqual({ vapidPublicKey: null, devices: 1 });
+    expect(response.push).toEqual({ vapidPublicKey: null, keys: 'absent', devices: 1 });
     expect(response.problems).toEqual([]);
   });
 
@@ -642,7 +642,7 @@ describe('GET /api/status', () => {
     await run();
     const response = await status();
     expect(response.checkedAt).toBe(new Date(now).toISOString());
-    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, devices: 0 });
+    expect(response.push).toEqual({ vapidPublicKey: vapid.publicKey, keys: 'ready', devices: 0 });
     expect(response.problems).toEqual([]);
   });
 
@@ -658,7 +658,7 @@ describe('GET /api/status', () => {
     for (const change of broken) {
       env = { ...env, VAPID_PRIVATE_KEY: vapid.privateKey, ...change };
       const response = await status();
-      expect(response.push).toEqual({ vapidPublicKey: null, devices: 0 });
+      expect(response.push).toEqual({ vapidPublicKey: null, keys: 'invalid', devices: 0 });
       expect(response.problems.map((problem) => problem.title)).toEqual([notValid]);
     }
     // And the right key again is right again (the check is remembered per pair, not for good).

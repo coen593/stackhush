@@ -86,6 +86,11 @@ export interface PushStatus {
    */
   vapidPublicKey: string | null;
   /**
+   * The state of the push keys: `absent` (push is not set up, not a problem), `invalid` (set,
+   * but not one valid pair: nothing is sent, and the dashboard shows a problem) or `ready`.
+   */
+  keys: 'absent' | 'invalid' | 'ready';
+  /**
    * How many browsers get push notifications now: the subscriptions of sessions that are still
    * signed in. One you do not recognise means someone else's browser is signed in.
    */

@@ -279,7 +279,7 @@ describe('signing in', () => {
       events: [],
       sources: expect.any(Array) as unknown,
       // The test env has no push keys.
-      push: { vapidPublicKey: null, devices: 0 },
+      push: { vapidPublicKey: null, keys: 'absent', devices: 0 },
     });
   });
 

@@ -138,6 +138,7 @@ export async function loadStatus(
     events: events.results.map(toEventView),
     push: {
       vapidPublicKey: secrets.vapid.kind === 'ready' ? secrets.vapid.keys.publicKey : null,
+      keys: secrets.vapid.kind,
       devices: push.devices,
     },
   };
