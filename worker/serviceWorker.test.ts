@@ -11,11 +11,20 @@ const ORIGIN = 'https://dash.test';
 
 type Handler = (event: Record<string, unknown>) => void;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** The time the worker sees; tests move it forward. */
+const clock = { now: Date.UTC(2026, 0, 1) };
+const FakeDate = { now: () => clock.now };
+
 function createScope(network: (request: Request) => Promise<Response>) {
   const handlers = new Map<string, Handler>();
   const stores = new Map<string, Map<string, Response>>();
-  const key = (input: Request | string) =>
-    new URL(typeof input === 'string' ? input : input.url, ORIGIN).pathname;
+  // Like the Cache API: the full URL (with its query) is the key; the tests show the path, and
+  // the query when there is one.
+  const key = (input: Request | string) => {
+    const url = new URL(typeof input === 'string' ? input : input.url, ORIGIN);
+    return url.pathname + url.search;
+  };
   const caches = {
     open: (name: string) => {
       const store = stores.get(name) ?? new Map<string, Response>();
@@ -74,7 +83,7 @@ function createScope(network: (request: Request) => Promise<Response>) {
     URL,
     Headers,
     Response,
-    Date,
+    Date: FakeDate,
     Number,
     String,
     Error,
@@ -164,6 +173,23 @@ describe('push event', () => {
     expect(scope.shown[1]?.options).toMatchObject({ data: { url: '/' } });
     expect(scope.badge).toEqual([1]);
   });
+
+  it('shows the generic notification for a null or empty payload', async () => {
+    const scope = createScope(() => Promise.reject(new Error('offline')));
+    await scope.dispatch('push', pushEvent(null));
+    await scope.dispatch('push', pushEvent(3));
+    await scope.dispatch('push', { data: null });
+    expect(scope.shown.map((entry) => entry.title)).toEqual([
+      'stackhush',
+      'stackhush',
+      'stackhush',
+    ]);
+    expect(scope.shown[0]?.options).toMatchObject({
+      body: 'Something changed.',
+      data: { url: '/' },
+    });
+    expect(scope.badge).toEqual([]);
+  });
 });
 
 describe('notificationclick', () => {
@@ -204,17 +230,50 @@ describe('caching', () => {
     expect(await response.json()).toEqual({ checkedAt: 'x' });
   });
 
-  it('never stores an error answer, and drops the stored status on 401', async () => {
+  it('serves a stored status up to 7 days old, and refuses and deletes an older one', async () => {
+    let online = true;
+    const scope = createScope(() =>
+      online
+        ? Promise.resolve(json(200, { checkedAt: 'x' }))
+        : Promise.reject(new Error('offline')),
+    );
+    await scope.dispatch('fetch', fetchEvent('/api/status'));
+    online = false;
+    clock.now += 7 * DAY_MS;
+    const response = (await scope.dispatch('fetch', fetchEvent('/api/status'))) as Response;
+    expect(response.status).toBe(200);
+    clock.now += 1;
+    await expect(scope.dispatch('fetch', fetchEvent('/api/status'))).rejects.toThrow('offline');
+    expect(scope.stores.get('stackhush-status-v2')!.size).toBe(0);
+  });
+
+  it('refuses a stored status without a readable time or from the future', async () => {
+    const scope = createScope(() => Promise.reject(new Error('offline')));
+    for (const cachedAt of ['', 'soon', String(clock.now + DAY_MS)]) {
+      scope.stores.set(
+        'stackhush-status-v2',
+        new Map([
+          ['/api/status', new Response('{}', { headers: { 'X-Stackhush-Cached-At': cachedAt } })],
+        ]),
+      );
+      await expect(scope.dispatch('fetch', fetchEvent('/api/status'))).rejects.toThrow('offline');
+      expect(scope.stores.get('stackhush-status-v2')!.size).toBe(0);
+    }
+  });
+
+  it('never stores an error answer, and drops the stored status and the badge on 401', async () => {
     let status = 500;
     const scope = createScope(() => Promise.resolve(json(status)));
     await scope.dispatch('fetch', fetchEvent('/api/status'));
-    expect([...scope.stores.get('stackhush-status-v1')!.keys()]).toEqual([]);
+    expect([...scope.stores.get('stackhush-status-v2')!.keys()]).toEqual([]);
     status = 200;
     await scope.dispatch('fetch', fetchEvent('/api/status'));
-    expect(scope.stores.get('stackhush-status-v1')!.size).toBe(1);
+    expect(scope.stores.get('stackhush-status-v2')!.size).toBe(1);
+    expect(scope.badge).toEqual([]);
     status = 401;
     await scope.dispatch('fetch', fetchEvent('/api/status'));
-    expect(scope.stores.get('stackhush-status-v1')!.size).toBe(0);
+    expect(scope.stores.get('stackhush-status-v2')!.size).toBe(0);
+    expect(scope.badge).toEqual(['clear']);
   });
 
   it('leaves every other request alone', async () => {
@@ -236,16 +295,38 @@ describe('caching', () => {
     );
     await scope.dispatch('fetch', fetchEvent('/assets/app-1.js'));
     await scope.dispatch('fetch', fetchEvent('/assets/missing.js'));
-    expect([...scope.stores.get('stackhush-shell-v1')!.keys()]).toEqual(['/assets/app-1.js']);
+    expect([...scope.stores.get('stackhush-shell-v2')!.keys()]).toEqual(['/assets/app-1.js']);
+  });
+
+  it('stores and finds an asset by its path, also when the request has a query', async () => {
+    let online = true;
+    const scope = createScope(() =>
+      online
+        ? Promise.resolve(new Response('code', { headers: { 'Content-Type': 'text/javascript' } }))
+        : Promise.reject(new Error('offline')),
+    );
+    await scope.dispatch('fetch', fetchEvent('/assets/app-1.js?v=1'));
+    expect([...scope.stores.get('stackhush-shell-v2')!.keys()]).toEqual(['/assets/app-1.js']);
+    online = false;
+    const response = (await scope.dispatch(
+      'fetch',
+      fetchEvent('/assets/app-1.js?v=1'),
+    )) as Response;
+    expect(await response.text()).toBe('code');
   });
 
   it('removes only older stackhush caches on activate', async () => {
     const scope = createScope(() => Promise.reject(new Error('offline')));
-    for (const name of ['stackhush-shell-v0', 'stackhush-status-v1', 'other-app']) {
+    for (const name of [
+      'stackhush-shell-v0',
+      'stackhush-status-v1',
+      'stackhush-status-v2',
+      'other-app',
+    ]) {
       scope.stores.set(name, new Map());
     }
     await scope.dispatch('activate', {});
-    expect([...scope.stores.keys()].sort()).toEqual(['other-app', 'stackhush-status-v1']);
+    expect([...scope.stores.keys()].sort()).toEqual(['other-app', 'stackhush-status-v2']);
   });
 });
 
@@ -265,7 +346,7 @@ describe('install', () => {
     await scope.dispatch('install', {});
     expect(seen).toContain('/assets/index-abc.js');
     expect(seen).toContain('/assets/index-abc.css');
-    expect(scope.stores.get('stackhush-shell-v1')!.has('/')).toBe(true);
+    expect(scope.stores.get('stackhush-shell-v2')!.has('/')).toBe(true);
   });
 });
 

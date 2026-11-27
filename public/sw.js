@@ -4,7 +4,7 @@
 //
 // Bump VERSION when the rules below change; activate deletes every older stackhush cache.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `stackhush-shell-${VERSION}`;
 const STATUS_CACHE = `stackhush-status-${VERSION}`;
 const PREFIX = 'stackhush-';
@@ -19,6 +19,9 @@ const SHELL_URLS = [
 const STATUS_PATH = '/api/status';
 // Set on the copy of /api/status that is served when the network is down; the page reads it.
 const CACHED_AT_HEADER = 'X-Stackhush-Cached-At';
+// A stored status older than this is refused and deleted: after "sign out everywhere", a lost
+// device must not keep showing the dashboard offline for good.
+const STATUS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const NOTIFICATION_TAG = 'stackhush-alert';
 
 self.addEventListener('install', (event) => {
@@ -73,7 +76,10 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
-/** Network first; the last good status when the network fails. Never stores an error. */
+/**
+ * Network first; the last good status when the network fails, if it is at most 7 days old.
+ * Never stores an error.
+ */
 async function statusResponse(request) {
   const cache = await caches.open(STATUS_CACHE);
   let response;
@@ -81,7 +87,13 @@ async function statusResponse(request) {
     response = await fetch(request);
   } catch (error) {
     const cached = await cache.match(STATUS_PATH);
-    if (cached) return cached;
+    if (!cached) throw error;
+    const cachedAt = Number(cached.headers.get(CACHED_AT_HEADER));
+    const age = Date.now() - cachedAt;
+    if (Number.isFinite(cachedAt) && cachedAt > 0 && age >= 0 && age <= STATUS_MAX_AGE_MS) {
+      return cached;
+    }
+    await cache.delete(STATUS_PATH);
     throw error;
   }
   if (response.ok) {
@@ -91,8 +103,9 @@ async function statusResponse(request) {
     });
     await cache.put(STATUS_PATH, new Response(await response.clone().arrayBuffer(), { headers }));
   } else if (response.status === 401) {
-    // Signed out: the stored status must not outlive the session.
+    // Signed out: neither the stored status nor the problem count may outlive the session.
     await cache.delete(STATUS_PATH);
+    await setBadge(0);
   }
   return response;
 }
@@ -115,10 +128,12 @@ async function pageResponse(request) {
 /** Stored copy first. Only the hashed files under /assets/ are added when missing. */
 async function shellResponse(request, mayStore) {
   const cache = await caches.open(SHELL_CACHE);
-  const cached = await cache.match(new URL(request.url).pathname);
+  // Stored and looked up by path, as install stores them.
+  const path = new URL(request.url).pathname;
+  const cached = await cache.match(path);
   if (cached) return cached;
   const response = await fetch(request);
-  if (mayStore && response.ok) await cache.put(request, response.clone());
+  if (mayStore && response.ok) await cache.put(path, response.clone());
   return response;
 }
 
@@ -129,7 +144,9 @@ self.addEventListener('push', (event) => {
 async function showAlert(data) {
   let payload = {};
   try {
-    payload = data ? data.json() : {};
+    // A push without data, `null`, or anything that is not an object: the generic notification.
+    const parsed = data ? data.json() : null;
+    if (parsed !== null && typeof parsed === 'object') payload = parsed;
   } catch {
     // Not JSON: show the generic notification below.
   }
@@ -143,8 +160,10 @@ async function showAlert(data) {
   // Only an address on this origin is opened; anything else falls back to the dashboard.
   let target = '/';
   try {
-    const url = new URL(payload.url, self.location.origin);
-    if (url.origin === self.location.origin) target = url.href;
+    if (typeof payload.url === 'string') {
+      const url = new URL(payload.url, self.location.origin);
+      if (url.origin === self.location.origin) target = url.href;
+    }
   } catch {
     // Keep the dashboard.
   }
