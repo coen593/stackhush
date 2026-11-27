@@ -1,6 +1,7 @@
 // The API router. Kept out of worker/index.ts because the Worker entry module may only export
 // handlers: the runtime treats every named export there as an entrypoint.
 
+import type { PushTestResponse } from '../shared/api.ts';
 import type { Config } from './config.ts';
 import {
   clearedSessionCookie,
@@ -15,14 +16,31 @@ import {
   requestSigninEmail,
   verifySigninCode,
 } from './emailSignin.ts';
+import {
+  composePayload,
+  deleteSubscription,
+  findSubscription,
+  loadSubscriptions,
+  MAX_SUBSCRIPTIONS,
+  parseEndpoint,
+  parseSubscription,
+  reserveTestSend,
+  saveSubscription,
+  sendPushes,
+} from './push.ts';
 import { emptyResponse, jsonResponse } from './responses.ts';
 import { readSecrets } from './secrets.ts';
+import { isRecord, type Fetcher } from './sources/http.ts';
 import { loadStatus } from './status.ts';
 
 interface RequestContext {
+  request: Request;
   db: D1Database;
   env: Env;
   config: Config;
+  now: Date;
+  /** For the one route that calls out: the test notification. */
+  fetcher: Fetcher;
   /** Stored hash of the caller's session; every route in protectedRoutes has one. */
   sessionHash: string;
 }
@@ -51,6 +69,9 @@ export const SIGNIN_PATH = '/api/signin';
 
 // A sign-in body is one code of at most 64 characters; anything much longer is not worth reading.
 const MAX_SIGNIN_BODY_BYTES = 200;
+// A subscription is an endpoint of at most 2048 characters and two short keys.
+const MAX_PUSH_BODY_BYTES = 4096;
+const TEST_NOTIFICATION_TITLE = 'Test notification from stackhush';
 
 // The complete list of routes that work without a session: the ways a session is made.
 // worker/access.test.ts pins this list, so adding to it is a deliberate, visible change.
@@ -80,6 +101,10 @@ export const protectedRoutes: readonly ApiRoute[] = [
       return emptyResponse(204, clearedSessionCookie());
     },
   },
+  // Push notifications (worker/push.ts); the request and response bodies are in shared/api.ts.
+  { method: 'POST', path: '/api/push/subscribe', handle: subscribePush },
+  { method: 'POST', path: '/api/push/unsubscribe', handle: unsubscribePush },
+  { method: 'POST', path: '/api/push/test', handle: testPush },
 ];
 
 export async function handleRequest(
@@ -87,6 +112,7 @@ export async function handleRequest(
   env: Env,
   now: Date,
   config: Config,
+  fetcher: Fetcher,
 ): Promise<Response> {
   const { pathname } = new URL(request.url);
   const db = env.DB;
@@ -107,7 +133,7 @@ export async function handleRequest(
     (candidate) => candidate.method === request.method && candidate.path === pathname,
   );
   if (!route) return emptyResponse(404);
-  return route.handle({ db, env, config, sessionHash });
+  return route.handle({ request, db, env, config, now, fetcher, sessionHash });
 }
 
 async function signIn({ request, env, now }: SessionFreeContext): Promise<Response> {
@@ -145,6 +171,60 @@ async function verifyTypedCode({ request, env, now }: SessionFreeContext): Promi
 }
 
 /**
+ * Stores this browser's push subscription. 409 when the installation has no push keys: the
+ * browser could not have made a subscription for it.
+ */
+async function subscribePush({ request, db, env, config, now }: RequestContext): Promise<Response> {
+  if (readSecrets(env, config).vapid.kind !== 'ready') return emptyResponse(409);
+  const subscription = await parseSubscription(await readJson(request, MAX_PUSH_BODY_BYTES));
+  if (subscription === null) return emptyResponse(400);
+  await saveSubscription(db, subscription, now);
+  return emptyResponse(204);
+}
+
+/** Deletes the subscription with this endpoint. Works without push keys too: it only removes. */
+async function unsubscribePush({ request, db }: RequestContext): Promise<Response> {
+  const body = await readJson(request, MAX_PUSH_BODY_BYTES);
+  const endpoint = isRecord(body) ? parseEndpoint(body['endpoint']) : null;
+  if (endpoint === null) return emptyResponse(400);
+  await deleteSubscription(db, endpoint);
+  return emptyResponse(204);
+}
+
+/**
+ * Sends a test notification to one subscription (the caller names its own endpoint) or to all
+ * of them, and says per subscription what the push service answered. Never an endpoint in the
+ * answer. At most MAX_TESTS_PER_HOUR requests an hour get as far as sending.
+ */
+async function testPush(context: RequestContext): Promise<Response> {
+  const { request, db, env, config, now, fetcher } = context;
+  const secrets = readSecrets(env, config);
+  if (secrets.vapid.kind !== 'ready') return emptyResponse(409);
+  const body = await readJson(request, MAX_PUSH_BODY_BYTES);
+  if (!isRecord(body)) return emptyResponse(400);
+
+  let subscriptions;
+  if (body['endpoint'] === undefined) {
+    subscriptions = await loadSubscriptions(db, MAX_SUBSCRIPTIONS);
+  } else {
+    const endpoint = parseEndpoint(body['endpoint']);
+    if (endpoint === null) return emptyResponse(400);
+    const subscription = await findSubscription(db, endpoint);
+    if (subscription === null) return emptyResponse(410);
+    subscriptions = [subscription];
+  }
+  if (!(await reserveTestSend(db, now))) return emptyResponse(429);
+
+  const status = await loadStatus(db, config, secrets);
+  const results = await sendPushes(
+    { db, fetcher, keys: secrets.vapid.keys, config, now },
+    subscriptions,
+    composePayload(TEST_NOTIFICATION_TITLE, status.problems.length, config),
+  );
+  return jsonResponse({ results } satisfies PushTestResponse, 200);
+}
+
+/**
  * Whether a POST comes from the dashboard's own page. Another site cannot make a browser send
  * Content-Type: application/json without a CORS preflight, which this API never answers, and
  * browsers say where a request comes from in Sec-Fetch-Site. Without these a hostile page could
@@ -161,16 +241,21 @@ function isOwnPagePost(request: Request): boolean {
 
 /** Expects JSON {"code": "..."}; returns null for anything else. */
 async function readSigninCode(request: Request): Promise<string | null> {
-  const text = await readBody(request, MAX_SIGNIN_BODY_BYTES);
+  const body = await readJson(request, MAX_SIGNIN_BODY_BYTES);
+  if (typeof body !== 'object' || body === null || !('code' in body)) return null;
+  return typeof body.code === 'string' ? body.code : null;
+}
+
+/** The parsed JSON body; null when it is too long or not JSON (JSON null is no use either). */
+async function readJson(request: Request, maxBytes: number): Promise<unknown> {
+  const text = await readBody(request, maxBytes);
   if (text === null) return null;
-  let body: unknown;
   try {
-    body = JSON.parse(text);
+    const body: unknown = JSON.parse(text);
+    return body;
   } catch {
     return null;
   }
-  if (typeof body !== 'object' || body === null || !('code' in body)) return null;
-  return typeof body.code === 'string' ? body.code : null;
 }
 
 /**

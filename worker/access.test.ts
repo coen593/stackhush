@@ -116,6 +116,80 @@ describe('the session guard', () => {
   });
 });
 
+describe('the push routes', () => {
+  const PUSH_PATHS = ['/api/push/subscribe', '/api/push/unsubscribe', '/api/push/test'];
+  // A body each of them would act on with a session: a well-formed subscription.
+  const SUBSCRIPTION = JSON.stringify({
+    endpoint: 'https://push.example.test/send/phone',
+    keys: {
+      // The subscriber's public key and auth secret of the example in RFC 8291.
+      p256dh:
+        'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4',
+      auth: 'BTBZMqHH6r4Tts7J_aSIgg',
+    },
+  });
+
+  function seedSubscription(): void {
+    sqlite
+      .prepare('INSERT INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)')
+      .run('https://push.example.test/send/phone', 'p256dh', 'auth');
+  }
+
+  function pushRows(): unknown {
+    return {
+      subscriptions: sqlite.prepare('SELECT COUNT(*) AS count FROM push_subscriptions').get(),
+      tests: sqlite.prepare('SELECT COUNT(*) AS count FROM push_test_sends').get(),
+    };
+  }
+
+  it('are all behind the session check, and only as POST', () => {
+    const push = protectedRoutes.filter((route) => route.path.startsWith('/api/push'));
+    expect(push.map((route) => `${route.method} ${route.path}`)).toEqual(
+      PUSH_PATHS.map((path) => `POST ${path}`),
+    );
+    expect(sessionFreeRoutes.filter((route) => route.path.includes('push'))).toEqual([]);
+  });
+
+  for (const path of PUSH_PATHS) {
+    it(`does nothing for POST ${path} with a real body and no session`, async () => {
+      seedSubscription();
+      await expectRefused(await call('POST', path, undefined, SUBSCRIPTION));
+      await expectRefused(await call('POST', path, generateToken(), SUBSCRIPTION));
+      await expectRefused(await call('POST', path, await insertSession(-MINUTE_MS), SUBSCRIPTION));
+      // Nothing stored, nothing deleted, no test counted. The test Worker has no network, so a
+      // send would also have thrown.
+      expect(pushRows()).toEqual({ subscriptions: { count: 1 }, tests: { count: 0 } });
+    });
+
+    it(`refuses POST ${path} from another site or as a form, even with a session`, async () => {
+      seedSubscription();
+      const sessionId = await insertSession(DAY_MS);
+      const cookie = { Cookie: `__Host-session=${sessionId}` };
+      const json = { ...cookie, 'Content-Type': 'application/json' };
+      const attempts: Record<string, string>[] = [
+        cookie,
+        { ...cookie, 'Content-Type': 'text/plain' },
+        { ...cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+        { ...json, 'Sec-Fetch-Site': 'cross-site' },
+        { ...json, 'Sec-Fetch-Site': 'same-site' },
+        { ...json, 'Sec-Fetch-Site': 'none' },
+      ];
+      for (const headers of attempts) {
+        await expectRefused(await post(path, headers, SUBSCRIPTION), 403);
+      }
+      expect(pushRows()).toEqual({ subscriptions: { count: 1 }, tests: { count: 0 } });
+    });
+
+    it(`keeps every other method on ${path} behind the session check, and 404 with one`, async () => {
+      const sessionId = await insertSession(DAY_MS);
+      for (const method of ['GET', 'PUT', 'DELETE', 'PATCH', 'HEAD']) {
+        await expectRefused(await call(method, path));
+        expect((await call(method, path, sessionId)).status).toBe(404);
+      }
+    });
+  }
+});
+
 describe('the routes that need no session', () => {
   it('are exactly the three ways to sign in', () => {
     // Pinned on purpose: a route added to sessionFreeRoutes is reachable by anyone.
@@ -201,6 +275,8 @@ describe('signing in', () => {
       unassigned: [],
       events: [],
       sources: expect.any(Array) as unknown,
+      // The test env has no push keys.
+      push: { vapidPublicKey: null },
     });
   });
 

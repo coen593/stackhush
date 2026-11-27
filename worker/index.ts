@@ -6,4 +6,4 @@
 import config from '../stackhush.config.ts';
 import { createWorker } from './app.ts';
 
-export default createWorker(config);
+export default createWorker(config, fetch);

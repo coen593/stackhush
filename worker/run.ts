@@ -1,6 +1,6 @@
-import { composeAlertEmail, sendAlertEmail } from './alerts.ts';
+import { composeAlertEmail, sendAlertEmail, type AlertEmail } from './alerts.ts';
 import { deleteExpiredAccess } from './access.ts';
-import { allowRedirects } from './budget.ts';
+import { shareBudget, type RedirectAllowance } from './budget.ts';
 import {
   cloudflareLabel,
   cloudflareSource,
@@ -15,12 +15,20 @@ import {
 } from './config.ts';
 import { deleteOldSigninRequests } from './emailSignin.ts';
 import type { SourceResult } from './observations.ts';
+import {
+  composePayload,
+  countSubscriptions,
+  loadSubscriptions,
+  sendPushes,
+  storePushShort,
+} from './push.ts';
 import { readSecrets, type Secrets } from './secrets.ts';
 import { fetchCloudflare } from './sources/cloudflare.ts';
 import { fetchGitHub } from './sources/github.ts';
 import type { Fetcher } from './sources/http.ts';
 import { fetchSupabase } from './sources/supabase.ts';
 import { fetchUptime } from './sources/uptime.ts';
+import { loadStatus } from './status.ts';
 import {
   finishRun,
   loadNotifiedReviewRequests,
@@ -56,10 +64,15 @@ export async function runChecks(
     loadNotifiedReviewRequests(env.DB),
   ]);
   const secrets = readSecrets(env, config);
+  // Counted before any check is made, so the pushes are part of this run's plan: every one is
+  // a subrequest, and they are set aside whether or not this run has something to say.
+  const subscriptions = await countPushSubscriptions(env.DB, secrets);
+  const share = shareBudget(config, secrets, previousChecks, subscriptions);
   // After the reads: some sources need what they stored last run (failing workflows, ...).
   const { results, notConfigured } = await collectSources(
-    { config, secrets, fetcher, now },
+    { env, config, secrets, fetcher, now },
     previousChecks,
+    share.redirects,
   );
 
   const evaluation = evaluate({
@@ -89,11 +102,19 @@ export async function runChecks(
     now: nowText,
   });
 
-  await sendUnsentAlerts(env, config, nowText);
+  const email = await sendUnsentAlerts(env, config, nowText);
   await finishRun(env.DB, nowText);
+  // Last, after every state write and after the email: nothing about push can hold them up.
+  await afterRun('push', () =>
+    pushAlert({ env, config, secrets, fetcher, now }, email, {
+      allowed: share.pushes,
+      short: subscriptions - share.pushes,
+    }),
+  );
 }
 
 interface RunContext {
+  env: Env;
   config: Config;
   secrets: Secrets;
   fetcher: Fetcher;
@@ -113,9 +134,9 @@ interface Collected {
 async function collectSources(
   { config, secrets, fetcher, now }: RunContext,
   previous: ReadonlyMap<string, PreviousCheck>,
+  redirects: RedirectAllowance,
 ): Promise<Collected> {
   const notConfigured: string[] = [];
-  const redirects = allowRedirects(config, secrets, previous);
   const calls: Promise<SourceResult>[] = [
     guard(UPTIME_SOURCE, UPTIME_LABEL, () =>
       fetchUptime(fetcher, config.projects, previous, redirects),
@@ -170,6 +191,62 @@ async function cleanUp(what: string, run: () => Promise<void>): Promise<void> {
   }
 }
 
+/** How many subscriptions a run plans a push for. None without push keys; none if unreadable. */
+async function countPushSubscriptions(db: D1Database, secrets: Secrets): Promise<number> {
+  if (secrets.vapid.kind !== 'ready') return 0;
+  try {
+    return await countSubscriptions(db);
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
+    console.error(`Counting push subscriptions failed (${code}); no push this run`);
+    return 0;
+  }
+}
+
+/** For what comes after the run is finished and must never fail it. */
+async function afterRun(what: string, run: () => Promise<void>): Promise<void> {
+  try {
+    await run();
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
+    console.error(`After the run, ${what} failed (${code})`);
+  }
+}
+
+interface PushPlan {
+  /** How many pushes the budget set aside. */
+  allowed: number;
+  /** Subscriptions it had no subrequest for. */
+  short: number;
+}
+
+/**
+ * One push per subscription in a run whose alert email was accepted, saying what the email's
+ * subject says. A run without an email (nothing changed, or the email failed and will be
+ * retried) pushes nothing, so a failing email service cannot make a phone buzz every run.
+ * What the push services answer is stored and logged as counts; it never becomes an alert.
+ */
+async function pushAlert(
+  { env, config, secrets, fetcher, now }: RunContext,
+  email: AlertEmail | null,
+  plan: PushPlan,
+): Promise<void> {
+  if (secrets.vapid.kind !== 'ready') return;
+  await storePushShort(env.DB, plan.short);
+  if (email === null || plan.allowed === 0) return;
+
+  const subscriptions = await loadSubscriptions(env.DB, plan.allowed);
+  if (subscriptions.length === 0) return;
+  const status = await loadStatus(env.DB, config, secrets);
+  const results = await sendPushes(
+    { db: env.DB, fetcher, keys: secrets.vapid.keys, config, now },
+    subscriptions,
+    composePayload(email.subject, status.problems.length, config),
+  );
+  const notSent = results.filter((result) => result.outcome !== 'sent').length;
+  if (notSent > 0) console.error(`${notSent} of ${results.length} push notification(s) not sent`);
+}
+
 async function guard(
   source: string,
   label: string,
@@ -186,20 +263,23 @@ async function guard(
 
 /**
  * Emails every alert not yet sent (this run's and any left over from failed sends) in one
- * message. They stay unsent until the email service accepts the message.
+ * message. They stay unsent until the email service accepts the message. Returns the email
+ * that was accepted, or null when there was nothing to send or sending failed.
  */
-async function sendUnsentAlerts(env: Env, config: Config, now: string): Promise<void> {
+async function sendUnsentAlerts(env: Env, config: Config, now: string): Promise<AlertEmail | null> {
   const unsent = await loadUnsentAlerts(env.DB);
-  if (unsent.length === 0) return;
+  if (unsent.length === 0) return null;
   const ids = unsent.map((alert) => alert.id);
+  const email = composeAlertEmail(unsent, config.dashboardUrl);
   try {
-    await sendAlertEmail(env, config, composeAlertEmail(unsent, config.dashboardUrl));
+    await sendAlertEmail(env, config, email);
   } catch (error) {
     // Only the error code: a message could echo parts of the email.
     const code = error instanceof Error && 'code' in error ? String(error.code) : 'unknown';
     console.error(`Alert email failed (${code}); ${unsent.length} alert(s) stay unsent`);
     await markAlertsFailed(env.DB, ids, now);
-    return;
+    return null;
   }
   await markAlertsSent(env.DB, ids);
+  return email;
 }

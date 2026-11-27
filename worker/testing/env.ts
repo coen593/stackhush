@@ -5,7 +5,9 @@ import { createWorker } from '../app.ts';
 import { TEST_CONFIG } from './fixtures.ts';
 
 /** The Worker's handlers on TEST_CONFIG, so tests do not depend on the installed config. */
-export const testWorker = createWorker(TEST_CONFIG);
+export const testWorker = createWorker(TEST_CONFIG, () =>
+  Promise.reject(new Error('This test Worker has no network')),
+);
 
 export function createTestEnv(db: D1Database): Env {
   const env = {

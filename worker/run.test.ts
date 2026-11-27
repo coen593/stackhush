@@ -57,6 +57,7 @@ const ALL_SECRETS: Secrets = {
   ]),
   supabase: 't',
   cloudflare: 't',
+  vapid: { kind: 'absent' },
 };
 
 let sqlite: DatabaseSync;

@@ -1,4 +1,4 @@
-// The shape of GET /api/status, shared by the Worker and the browser. Only types live here:
+// The shapes of GET /api/status and of the push routes, shared by the Worker and the browser. Only types live here:
 // anything in shared/ ends up in the static bundle, so it must never hold project names,
 // group names, repo names or other private data.
 
@@ -76,6 +76,75 @@ export interface StatusResponse {
   sources: CheckView[];
   /** The latest 50 transitions, newest first. */
   events: EventView[];
+  push: PushStatus;
+}
+
+export interface PushStatus {
+  /**
+   * The key a browser subscribes with (the applicationServerKey of pushManager.subscribe):
+   * a P-256 public key, base64url. Null when push is not set up on this installation.
+   */
+  vapidPublicKey: string | null;
+}
+
+/**
+ * Body of POST /api/push/subscribe: what the browser's PushSubscription.toJSON() gives. Other
+ * fields of it (expirationTime) may be sent along and are ignored. 204 when stored (again);
+ * 400 for a body that is not a subscription; 409 when push is not set up.
+ */
+export interface PushSubscribeRequest {
+  /** The https URL of the push service for this browser. */
+  endpoint: string;
+  keys: {
+    /** The browser's P-256 public key, 65 bytes as unpadded base64url. */
+    p256dh: string;
+    /** The browser's auth secret, 16 bytes as unpadded base64url. */
+    auth: string;
+  };
+}
+
+/** Body of POST /api/push/unsubscribe. 204 whether or not the endpoint was stored. */
+export interface PushUnsubscribeRequest {
+  endpoint: string;
+}
+
+/**
+ * Body of POST /api/push/test. With an endpoint only that browser gets the notification (410
+ * when it is not, or no longer, subscribed: subscribe again); without one, every subscribed
+ * browser. 409 when push is not set up, 429 when the hour's tests are used up.
+ */
+export interface PushTestRequest {
+  endpoint?: string;
+}
+
+/**
+ * What the push service did with one message. `gone`: it no longer knows the subscription
+ * (HTTP 404 or 410), which has been deleted here too. `failed`: anything else, including no
+ * answer at all.
+ */
+export type PushOutcome = 'sent' | 'gone' | 'failed';
+
+export interface PushTestResult {
+  outcome: PushOutcome;
+  /** The push service's HTTP status; null when it did not answer. */
+  status: number | null;
+}
+
+/** Answer of POST /api/push/test: one result per subscription tried, without its endpoint. */
+export interface PushTestResponse {
+  results: PushTestResult[];
+}
+
+/** The decrypted JSON of a push message, for the service worker's push event. */
+export interface PushPayload {
+  /** The subject of the alert email sent in the same run. */
+  title: string;
+  /** One short line, for example '2 current problems'. */
+  body: string;
+  /** How many problems the dashboard shows right now, for the badge on the app icon. */
+  problemCount: number;
+  /** The dashboard, to open when the notification is tapped. */
+  url: string;
 }
 
 /** Body of POST /api/signin. */

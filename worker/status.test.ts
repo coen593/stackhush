@@ -21,6 +21,7 @@ const ALL_SECRETS: Secrets = {
   ]),
   supabase: 't',
   cloudflare: 't',
+  vapid: { kind: 'absent' },
 };
 
 function json(body: unknown, status = 200): Response {

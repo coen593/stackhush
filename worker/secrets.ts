@@ -2,12 +2,22 @@
 // optional: a source without its token is "not configured" and is simply not checked.
 
 import { githubTokenSecretName, type Config } from './config.ts';
+import { isVapidKeyPair, type VapidKeys } from './webPush.ts';
+
+/**
+ * The push keys (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY, made by `npm run push-keys`). Without
+ * them push is simply not set up. `invalid` is one of the two missing, or values that are not
+ * a key pair: the dashboard says so, and nothing is sent.
+ */
+export type VapidSecrets =
+  { kind: 'absent' } | { kind: 'invalid' } | { kind: 'ready'; keys: VapidKeys };
 
 export interface Secrets {
   /** GitHub owner key -> token, for the owners that have one. */
   github: ReadonlyMap<string, string>;
   supabase: string | null;
   cloudflare: string | null;
+  vapid: VapidSecrets;
 }
 
 /** Reads the secrets a config needs from the Worker's env. Missing and empty both mean absent. */
@@ -23,5 +33,17 @@ export function readSecrets(env: Env, config: Config): Secrets {
     const token = read(githubTokenSecretName(owner.key));
     if (token !== null) github.set(owner.key, token);
   }
-  return { github, supabase: read('SUPABASE_TOKEN'), cloudflare: read('CF_TOKEN') };
+  return {
+    github,
+    supabase: read('SUPABASE_TOKEN'),
+    cloudflare: read('CF_TOKEN'),
+    vapid: readVapid(read('VAPID_PUBLIC_KEY'), read('VAPID_PRIVATE_KEY')),
+  };
+}
+
+function readVapid(publicKey: string | null, privateKey: string | null): VapidSecrets {
+  if (publicKey === null && privateKey === null) return { kind: 'absent' };
+  if (publicKey === null || privateKey === null) return { kind: 'invalid' };
+  const keys = { publicKey, privateKey };
+  return isVapidKeyPair(keys) ? { kind: 'ready', keys } : { kind: 'invalid' };
 }

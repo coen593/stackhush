@@ -73,8 +73,8 @@ export async function loadStatus(
   const { projects } = config;
   const [run, checks, sources, events, failingEvents, unsent] = await Promise.all([
     db
-      .prepare('SELECT last_run_finished_at FROM run_state WHERE id = 1')
-      .first<{ last_run_finished_at: string | null }>(),
+      .prepare('SELECT last_run_finished_at, push_short FROM run_state WHERE id = 1')
+      .first<{ last_run_finished_at: string | null; push_short: number }>(),
     db
       .prepare(
         'SELECT project_id, check_key, status, summary, link_url, detail_json, problem_since, observed_at FROM check_states',
@@ -121,6 +121,7 @@ export async function loadStatus(
       ...budgetProblems(current),
       ...sourceProblems(configured, failingEvents.results, config),
       ...emailProblems(unsent),
+      ...pushProblems(secrets, run),
     ].sort((a, b) => b.since.localeCompare(a.since)),
     groups,
     unassigned: (byProject.get(UNASSIGNED_PROJECT_ID) ?? []).map(toCheckView),
@@ -132,6 +133,7 @@ export async function loadStatus(
       ),
     ),
     events: events.results.map(toEventView),
+    push: { vapidPublicKey: secrets.vapid.kind === 'ready' ? secrets.vapid.keys.publicKey : null },
   };
 }
 
@@ -290,6 +292,41 @@ function emailProblems(unsent: UnsentRow | null): ProblemView[] {
     {
       projectId: null,
       title: `Alert email failing: ${unsent.total} unsent since ${sinceText}`,
+      linkUrl: null,
+      since,
+    },
+  ];
+}
+
+/**
+ * Push is optional: without its keys there is nothing to say. Two things are worth a line.
+ * Keys that are set but are not a key pair, because then the owner believes push works. And
+ * subscriptions the last run had no subrequest for (worker/budget.ts): the email still went
+ * out, but that phone stays silent until the budget has room.
+ */
+function pushProblems(
+  secrets: Secrets,
+  run: { last_run_finished_at: string | null; push_short: number } | null,
+): ProblemView[] {
+  // Sorts with the newest: it is true as of the last run, or as of now before any run.
+  const since = run?.last_run_finished_at ?? new Date().toISOString();
+  if (secrets.vapid.kind === 'invalid') {
+    return [
+      {
+        projectId: null,
+        title:
+          'Push keys are not valid: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be set together; run npm run push-keys',
+        linkUrl: null,
+        since,
+      },
+    ];
+  }
+  if (secrets.vapid.kind === 'absent' || !run || run.push_short === 0) return [];
+  const devices = run.push_short === 1 ? '1 device' : `${run.push_short} devices`;
+  return [
+    {
+      projectId: null,
+      title: `Over the subrequest budget: no push notification for ${devices}; raise subrequestBudget or remove checks`,
       linkUrl: null,
       since,
     },
