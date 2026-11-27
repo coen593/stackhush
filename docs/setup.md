@@ -284,15 +284,26 @@ After step 9, open the dashboard on the phone and sign in.
 
 - **iPhone and iPad:** open it in Safari, choose Share, then Add to Home Screen, and open the
   new icon. Notifications and the badge only work in that Home Screen app (iOS 16.4 or later).
+  The Home Screen app signs in on its own: it does not share Safari's cookies, so being signed
+  in in Safari does not count there. The link in the sign-in email opens Safari, and a link from
+  `npm run signin-link` cannot be pasted into the app (it has no address bar). Inside the Home
+  Screen app, tap "Email me a sign-in code" and type the code from the email on that same
+  screen.
 - **Android and desktop Chrome:** the browser works as it is; installing the page also works.
 
 At the bottom of the page, under Notifications, tap "Turn on notifications" and allow them when
-asked. "Send test notification" checks the whole path (5 an hour). "Turn off" and signing out
-both remove this device. If the page says push is not set up, step 9 is missing; if
-notifications are blocked, allow them in the browser or phone settings and reload.
+asked. The section also says on how many devices notifications are on. "Send test notification"
+checks the whole path (5 an hour). "Turn off" and signing out both remove this device. If the
+page says push is not set up, step 9 is missing; if it says the keys are not valid, run step 9
+again; if notifications are blocked, allow them in the browser or phone settings and reload.
 
-If you run `npm run push-keys` again, every device has to turn notifications off and on again
-(a device notices the new key by itself and subscribes again when the page is open).
+A device keeps getting notifications only while its session lives (sessions last 180 days).
+When it has ended, sign in again on that device and open the dashboard: the device is tied to
+the new session by itself, without turning notifications off and on.
+
+If you run `npm run push-keys` again, nothing needs doing on the devices: each one notices the
+new key the next time its dashboard is open and subscribes again by itself. Until then it gets
+no notifications.
 
 ## Bigger setups: the subrequest budget
 

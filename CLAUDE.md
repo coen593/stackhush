@@ -85,8 +85,9 @@ observations) -> (new state, transitions)`; `worker/store.ts` does the D1 reads 
   sets the same headers on static assets (`worker/headers.test.ts` keeps them in sync).
 - `public/sw.js` the service worker (plain JS, no build; served `Cache-Control: no-cache`). It
   caches only the app shell (`stackhush-shell-<version>`) and the last good `/api/status`
-  (`stackhush-status-<version>`, served offline with an `X-Stackhush-Cached-At` header, dropped on
-  401), never an error or any other route; bump `VERSION` when its rules change.
+  (`stackhush-status-<version>`, served offline with an `X-Stackhush-Cached-At` header only while
+  at most 7 days old, refused and deleted after that, dropped on 401 together with the badge),
+  never an error or any other route; bump `VERSION` when its rules change (now `v2`).
   `worker/serviceWorker.test.ts` runs it in a fake scope with synthetic push and click events.
   `src/lib/push.ts` and `src/hooks/useNotifications.ts` are the page's side (subscribe, rotate on
   a changed key, test, badge, sign-out cleanup); `src/components/Notifications.tsx` is the control.
@@ -138,8 +139,10 @@ Routes (all in `protectedRoutes`; bodies and answers are typed in `shared/api.ts
 may repeat it), `POST /api/push/unsubscribe` (`{ endpoint }`), `POST /api/push/test`
 (`{ endpoint? }`: that device or all; 5 an hour through `push_test_sends`; answers outcome
 codes, never endpoints; no slot is used when there is nothing to send). The browser subscribes
-with `push.vapidPublicKey` from `GET /api/status` (null: not set up); `push.devices` is how
-many subscriptions are live. Endpoints are stored as the URL's normal form (`url.href`).
+with `push.vapidPublicKey` from `GET /api/status` (null: not set up or not valid; `push.keys`
+says which); `push.devices` is how many subscriptions are live. The page posts subscribe again
+on every load while subscribed (`checkSubscription` in `src/lib/push.ts`), which ties the device
+to the session of a new sign-in; sign-out treats 401 and 403 from unsubscribe as done. Endpoints are stored as the URL's normal form (`url.href`).
 
 A subscription belongs to the session that made it (`session_hash`; subscribing again moves it
 to the session that asks). Every read has the condition "its session exists and has not

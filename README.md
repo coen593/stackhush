@@ -34,13 +34,15 @@ Add the dashboard to your Home Screen and it works like an app:
 - Push notifications on the same events that send the alert email (optional, needs the keys of
   [setup step 9](docs/setup.md#9-push-notifications-optional)).
 - A badge on the app icon with the number of current problems.
-- An offline view: without a network it shows the last status it loaded, marked "Offline, last
-  updated N min ago".
+- An offline view: without a network it shows the last status it loaded, marked with how old
+  it is (up to 7 days old; an older copy is not shown).
 - Proper icons.
 
 On iPhone and iPad, notifications and the badge only work in the Home Screen app, not in a
-Safari tab: add it first (Share, Add to Home Screen) and turn notifications on from there. Push
-is best effort; the email stays the record. See
+Safari tab: add it first (Share, Add to Home Screen) and turn notifications on from there. The
+Home Screen app signs in separately from Safari: inside it, tap "Email me a sign-in code" and
+type the code there (the link in the email opens Safari). Push is best effort; the email stays
+the record. See
 [docs/setup.md](docs/setup.md#10-notifications-on-the-phone).
 
 ## What it watches

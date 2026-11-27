@@ -77,11 +77,18 @@ is deleted. One that keeps failing for another reason stays, and is tried again 
 alert, until that device turns notifications off or the subscriptions are deleted (see
 [setup.md](setup.md#9-push-notifications-optional)).
 
-**A device gets notifications only while it is signed in.** A subscription belongs to the
-session of the browser that made it. When that session ends (signing out, the 180 days running
-out, or `DELETE FROM sessions`), the subscription gets nothing more from that moment and is
-deleted within five minutes. After signing in again, opening the dashboard on the device turns
-its notifications back on. At most 10 devices are kept; an eleventh replaces the one that was
+**On iPhone and iPad, push and the badge need the Home Screen app.** iOS (16.4 or later) only
+offers notifications and the app badge to a page added to the Home Screen, not to a Safari tab.
+That app has its own sign-in, apart from Safari: inside it, use "Email me a sign-in code" and
+type the code there, because the link in the email opens Safari and a terminal link cannot be
+pasted into it.
+
+**A device gets notifications only while its session lives.** A subscription belongs to the
+session of the browser that made it, and sessions last 180 days. When that session ends
+(signing out, the 180 days running out, or `DELETE FROM sessions`), the subscription gets
+nothing more from that moment and is deleted within five minutes. Signing in again on that
+device (in the Home Screen app on iPhone and iPad) and opening the dashboard re-attaches it to
+the new session; notifications need not be turned off and on. At most 10 devices are kept; an eleventh replaces the one that was
 active longest ago (last turned on or sent a notification).
 
 **Each push is a subrequest, and the checks come first.** Pushes are sent at the end of a run
