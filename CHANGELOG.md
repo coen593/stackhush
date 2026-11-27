@@ -8,11 +8,13 @@
   `VAPID_PRIVATE_KEY`, which `npm run push-keys` makes and stores without showing the private
   key. Without them nothing changes. See [docs/setup.md](docs/setup.md#9-push-notifications-optional).
 - New routes behind the session check: `POST /api/push/subscribe`, `/api/push/unsubscribe` and
-  `/api/push/test` (5 an hour). `GET /api/status` gains `push.vapidPublicKey`.
-- Each push is one subrequest of the run's budget, set aside after the checks and their known
-  redirects. Devices that do not fit get no notification and show as a problem on the
-  dashboard; the email is always sent. Push is best effort and the email stays the record, see
-  [docs/limits.md](docs/limits.md).
+  `/api/push/test` (5 an hour). `GET /api/status` gains `push.vapidPublicKey` and `push.devices`.
+- A device gets notifications only while its browser is signed in: a subscription is deleted
+  with the session that made it.
+- Each push is one subrequest, paid last from what a run has left of its budget after the
+  checks and their redirects. Devices that do not fit get no notification and show as a problem
+  on the dashboard; the email is always sent. Push is best effort and the email stays the
+  record, see [docs/limits.md](docs/limits.md).
 - The dashboard is now a PWA: a service worker (`public/sw.js`) caches the app shell and the last
   `/api/status` (nothing else), so the page opens offline with "Offline, last updated N min ago";
   it shows push notifications, sets the app icon badge to the number of problems and focuses or

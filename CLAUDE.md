@@ -37,16 +37,20 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
   `alertTo` that is not the email binding's destination and a `dashboardUrl` whose host no route
   serves (`worker/deployGuard.ts`, run by `scripts/check-config.ts --deploy`).
 - There are three migrations: 0001, 0002 and `0003_push.sql` (push subscriptions, the test
-  rate limit, `run_state.push_short`). Another third one (`0003_spread.sql`, table
-  `scheduled_units`) existed only in unpublished commits and was never applied to a live
+  rate limit, `run_state.push_short`). 0003 was changed before any release (session_hash,
+  last_active_at): a local `.wrangler` state from before that needs
+  `rm -rf .wrangler/state && npm run db:migrate:local`. Another third one (`0003_spread.sql`,
+  table `scheduled_units`) existed only in unpublished commits and was never applied to a live
   database; a local `.wrangler` state that has it is harmless.
 - Stored keys are a compatibility surface: `check_states (project_id, check_key)`,
   `source_health.source`, `notified_review_requests.repo` and the secret names. Existing
   installations depend on them; do not change how they are built. Migrations are additive only.
 - Push is optional too: the secrets `VAPID_PUBLIC_KEY` (65-byte uncompressed P-256 point) and
   `VAPID_PRIVATE_KEY` (32-byte scalar), both unpadded base64url, read into `Secrets.vapid` as
-  `absent` (not set up, never a problem), `invalid` (one missing or not keys: a dashboard
-  problem, nothing sent) or `ready`.
+  `absent` (not set up, never a problem), `invalid` (one missing, not keys, or not one pair: a
+  dashboard problem, nothing sent) or `ready`. `readSecrets` checks the shape; `confirmVapid`
+  (once per isolate) checks that the two belong together, and everything that acts on the push
+  keys reads them through it.
 
 ## Layout
 
@@ -68,13 +72,13 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
 observations) -> (new state, transitions)`; `worker/store.ts` does the D1 reads and writes;
   `worker/alerts.ts` composes and sends the one batched email through the `ALERT_EMAIL` binding.
   `worker/testing/fixtures.ts` holds the test config and synthetic API responses.
-- `worker/budget.ts` shares what the budget leaves among uptime redirects and pushes (see "The
-  subrequest budget" below).
+- `worker/budget.ts` shares what the budget leaves among uptime redirects (see "The subrequest
+  budget" below).
 - `worker/webPush.ts` Web Push with WebCrypto only, no dependency: RFC 8291 encryption
   (aes128gcm) and the RFC 8292 VAPID header. `worker/webPush.test.ts` checks it against the
   RFC 8291 Appendix A vector; `worker/testing/pushReceiver.ts` is the browser's side, for tests.
-  `worker/push.ts` has the subscriptions (validation, the cap of 10, deletion), sending, and
-  the test rate limit; see "Push" below.
+  `worker/push.ts` has the subscriptions (validation, the cap of 10, their tie to a session,
+  deletion), sending, and the test rate limit; see "Push" below.
 - `worker/status.ts` builds `GET /api/status`: groups, problems, events and one row per source
   (working, failing, not configured).
 - `worker/responses.ts` builds every API response with the security headers; `public/_headers`
@@ -112,9 +116,9 @@ so it fails at build, at Worker start and in `npm run deploy`.
 
 A run never makes more subrequests than the budget. Uptime checks follow redirects by hand
 (`redirect: 'manual'`, at most 5) and pay for them from what the budget has left after the plan
-(`shareBudget` in `worker/budget.ts`): first the chains of URLs whose last check completed
-(`redirects` in the row's `detail_json`), then URLs whose last check ran short, then one per
-push subscription (see "Push"), then new redirects from the shared spare. A URL that ran short never takes a subrequest from a completed chain,
+(`allowRedirects` in `worker/budget.ts`): first the chains of URLs whose last check completed
+(`redirects` in the row's `detail_json`), then URLs whose last check ran short, then new ones
+from the shared spare. A URL that ran short never takes a subrequest from a completed chain,
 and keeps its `short` mark through a check that could not reach it (only a chain followed to
 the end clears it).
 A redirect with no subrequest left is not followed: the observation is `unknown` (state kept)
@@ -123,27 +127,39 @@ of memory that is stored even with an unknown status. `worker/status.ts` turns `
 problem "Over the subrequest budget: <url> needs at least N more" until a check completes. Tests:
 `worker/budget.test.ts`, `worker/sources/uptimeRedirects.test.ts`.
 
+Pushes are paid last: `runChecks` counts every request its checks make (a counting fetcher) and
+gives the pushes what is left of the budget at the end, so a push never takes a subrequest from
+a check or a redirect.
+
 ## Push
 
 Routes (all in `protectedRoutes`; bodies and answers are typed in `shared/api.ts`):
 `POST /api/push/subscribe` (the browser's `PushSubscription.toJSON()`; an upsert, so the page
 may repeat it), `POST /api/push/unsubscribe` (`{ endpoint }`), `POST /api/push/test`
 (`{ endpoint? }`: that device or all; 5 an hour through `push_test_sends`; answers outcome
-codes, never endpoints). The browser subscribes with `push.vapidPublicKey` from
-`GET /api/status` (null: not set up).
+codes, never endpoints; no slot is used when there is nothing to send). The browser subscribes
+with `push.vapidPublicKey` from `GET /api/status` (null: not set up); `push.devices` is how
+many subscriptions are live. Endpoints are stored as the URL's normal form (`url.href`).
+
+A subscription belongs to the session that made it (`session_hash`; subscribing again moves it
+to the session that asks). Every read has the condition "its session exists and has not
+expired", and rows without one are deleted by the cron cleanup and before every send, so
+signing out, expiry and `DELETE FROM sessions` all end a browser's notifications. At the cap of
+10 the row with the oldest `last_active_at` (last subscribe or accepted push) goes.
 
 A run pushes only when its alert email was accepted, and last: after `markAlertsSent` and
 `finishRun`, inside `afterRun`, which catches everything. The payload is `PushPayload`
 (`shared/api.ts`): the email subject, a short body, the number of current problems (for the
 badge) and `dashboardUrl`. 404 or 410 from the push service deletes that subscription; any
 other failure only counts up `consecutive_failures`. Push failures never write an event or an
-alert. `runChecks` counts the stored subscriptions before the checks and `shareBudget` sets a
-subrequest aside for each, after known redirects; the ones that do not fit (newest first) are
-skipped, their number is stored in `run_state.push_short`, and `worker/status.ts` shows it as
-a problem. Tests: `worker/push.test.ts`, the push block in `worker/access.test.ts`.
+alert. The pushes get `subrequestBudget` minus the requests the checks made; subscriptions
+that do not fit (newest first) are skipped, their number is stored in `run_state.push_short`
+in every run (alerting or not), and `worker/status.ts` shows it as a problem.
+`worker/status.ts` reads the push state on its own and treats a database without 0003 as "no
+push", so a Worker ahead of its schema still answers. Tests: `worker/push.test.ts`, the push block in `worker/access.test.ts`.
 
 `npm run push-keys` (the owner runs it, never an agent; `--dry-run` is safe) generates the
-pair and pipes each key to `wrangler secret put` on stdin. Never print, log or store the
+pair and pipes both keys as JSON to one `wrangler secret bulk` call on stdin. Never print, log or store the
 private key, and never send a push to a real push service from a test or a local run.
 
 ## Sign-in
@@ -179,6 +195,8 @@ has no pre-hook that would copy the example into place; only `signin-link:local`
 
 Agents never run the remote script, and never print a live code, request id or session id.
 To sign out everywhere: `npx wrangler d1 execute DB --remote --command "DELETE FROM sessions"`.
+That also ends every push subscription (each belongs to a session). To drop the subscriptions
+only: `npx wrangler d1 execute DB --remote --command "DELETE FROM push_subscriptions"`.
 
 ## Commands
 

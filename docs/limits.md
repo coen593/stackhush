@@ -67,23 +67,32 @@ Workers Free up to 50), remove a check, or point the URL at where it redirects t
 **Push notifications are best effort; the email is the record.** A push is sent only in a run
 whose alert email was accepted, after the email and after the run's results are stored, once
 per device, and it is not retried: if the push service is unreachable or refuses the message,
-that notification is lost, and a phone that stays off for more than 12 hours never gets it. The
-email carries the same news, and alerts whose email failed are kept and sent again; nothing
-like that exists for push. A failed push is counted with the device's subscription and never
-shows as a problem or sends an alert. A subscription the push service no longer knows (it
-answers 404 or 410, for example after the app was removed from the phone) is deleted. One that
-keeps failing for another reason, such as one made with a key pair that was since replaced,
-stays and keeps costing its subrequest until that device turns notifications off or the
-subscriptions are deleted (see [setup.md](setup.md#9-push-notifications-optional)).
+that notification is lost, and a phone that stays off for more than 12 hours never gets it.
+While the alert email fails there is no push either; both go out in the run in which the email
+gets through. The email carries the same news, and alerts whose email failed are kept and sent
+again; nothing like that exists for push. A failed push is counted with the device's
+subscription and never shows as a problem or sends an alert. A subscription the push service
+no longer knows (it answers 404 or 410, for example after the app was removed from the phone)
+is deleted. One that keeps failing for another reason stays, and is tried again at the next
+alert, until that device turns notifications off or the subscriptions are deleted (see
+[setup.md](setup.md#9-push-notifications-optional)).
 
-**Each push is a subrequest.** One per device with notifications on (at most 10 devices are
-kept) is set aside in every run, whether or not the run turns out to alert, after the planned
-calls and the redirects that are known, and before the spare for new redirects. So devices
-never take a subrequest from a check, and a run still never makes more than
-`subrequestBudget`. Devices that do not fit are skipped for that run, the newest first: the
-email is sent, and the dashboard shows "Over the subrequest budget: no push notification for N
-devices; raise subrequestBudget or remove checks" until they fit. Turning notifications on for
-a device leaves one subrequest fewer for redirects nobody knew about yet.
+**A device gets notifications only while it is signed in.** A subscription belongs to the
+session of the browser that made it. When that session ends (signing out, the 180 days running
+out, or `DELETE FROM sessions`), the subscription gets nothing more from that moment and is
+deleted within five minutes. After signing in again, opening the dashboard on the device turns
+its notifications back on. At most 10 devices are kept; an eleventh replaces the one that was
+active longest ago (last turned on or sent a notification).
+
+**Each push is a subrequest, and the checks come first.** Pushes are sent at the end of a run
+from what the run has left of `subrequestBudget` after every check and every redirect it
+followed, so a device never takes a subrequest from a check and a run still never makes more
+than the budget. Devices that do not fit are skipped for that run, the newest first: the email
+is sent, and the dashboard shows "Over the subrequest budget: no push notification for N
+devices; raise subrequestBudget or remove checks". That line is worked out in every run, also
+one with nothing to say, so it shows before an alert is missed; it comes and goes with what the
+checks needed in the last run (a site that starts redirecting can take the room the devices
+had).
 
 The notification holds the subject of the alert email, the number of current problems and the
 dashboard's address, encrypted for that device (RFC 8291); the push service cannot read it. It

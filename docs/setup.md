@@ -248,27 +248,31 @@ service that a message comes from your Worker. Make it once, after the first dep
 npm run push-keys
 ```
 
-It makes the pair in memory and hands each key to `wrangler secret put` on standard input, as
-the secrets `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. The private key is never shown and
-never written to a file, so there is nothing to keep safe or to paste. Like `signin-link`, it
+It makes the pair in memory and hands both keys to one `wrangler secret bulk` call on standard
+input, as the secrets `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. The private key is never shown
+and never written to a file, so there is nothing to keep safe or to paste. Like `signin-link`, it
 refuses to run without a `stackhush.config.ts` of your own. `npm run push-keys -- --dry-run`
 makes a pair, shows its public key and stores nothing.
 
 - `VAPID_PUBLIC_KEY` is the 65-byte uncompressed P-256 public key and `VAPID_PRIVATE_KEY` the
   32-byte private scalar, both as unpadded base64url. That is the form other Web Push tools
   use, so a pair you already have works too: set both with `npx wrangler secret put`.
-- Set both or neither. With one missing, or values that are not such keys, the dashboard shows
-  the problem "Push keys are not valid" and sends no notifications. If the script stops after
-  the first key, run it again.
+- Set both or neither, and they must be one pair. With one missing, values that are not such
+  keys, or two keys that do not belong together, the dashboard shows the problem "Push keys are
+  not valid" and sends no notifications; run the script again.
 - Running the script again replaces the pair. Subscriptions belong to the pair they were made
-  with, so afterwards every device has to turn notifications off and on again. To drop the old
-  ones at once:
-  `npx wrangler d1 execute DB --remote --command "DELETE FROM push_subscriptions"`.
+  with; a device subscribes again by itself the next time its dashboard is open.
 - To switch push off, delete both secrets (`npx wrangler secret delete VAPID_PUBLIC_KEY`, and
   the same for `VAPID_PRIVATE_KEY`). Stored subscriptions are kept and simply not used.
+- A device gets notifications only while its browser is signed in: signing out, or signing out
+  everywhere with `npx wrangler d1 execute DB --remote --command "DELETE FROM sessions"`, ends
+  them for the browsers concerned. To remove every device without signing anyone out:
+  `npx wrangler d1 execute DB --remote --command "DELETE FROM push_subscriptions"`; each device
+  turns itself on again when its dashboard is next opened.
 
-Each device that has notifications on costs one subrequest in a run, see the next section. At
-most 10 devices are kept; an eleventh replaces the oldest.
+Each device that has notifications on costs one subrequest in a run that alerts, see "Bigger
+setups" below. At most 10 devices are kept; an eleventh replaces the one that was active
+longest ago.
 
 Upgrading an installation from 0.1: `npm run deploy` applies the new migration
 (`0003_push.sql`) before it deploys. Nothing else is needed, and nothing changes until the keys
@@ -309,11 +313,11 @@ stackhush follows itself (up to 5) and counts. A redirect there is no subrequest
 followed: the site keeps the state it had, and the dashboard shows "Over the subrequest budget"
 for that URL until it fits (see [limits.md](limits.md)).
 
-Push notifications come out of the same budget: one subrequest per device with notifications
-on, set aside in every run after the redirects that are already known. A setup that plans 43
-of a budget of 50 and follows 3 redirects has room for 4 devices. Devices that do not fit get
-no notification (the email is sent all the same) and the dashboard says "Over the subrequest
-budget: no push notification for N devices".
+Push notifications come out of the same budget, last: one subrequest per device with
+notifications on, from what a run has left after its checks and the redirects it followed. A
+setup that plans 43 of a budget of 50 and follows 3 redirects has room for 4 devices. Devices
+that do not fit get no notification (the email is sent all the same) and the dashboard says
+"Over the subrequest budget: no push notification for N devices".
 
 Checks that take turns across runs, so that a big setup fits the Free plan, are not in this
 version. They may come later.
