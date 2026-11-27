@@ -20,7 +20,6 @@ import {
   supabaseBody,
   type FixtureRun,
   TEST_PROJECTS,
-  recentRunsBody,
   workflowRunsBody,
   WORK_OWNER,
 } from '../testing/fixtures.ts';
@@ -349,7 +348,7 @@ describe('deployObservation', () => {
 });
 
 describe('ciObservation', () => {
-  const parse = (runs: Run[]) => parseWorkflowRuns(workflowRunsBody(runs), 'acme/demo-app');
+  const parse = (runs: Run[]) => parseWorkflowRuns(workflowRunsBody(runs));
 
   it('is null without any runs', () => {
     expect(ciObservation(DEMO_PROJECT, [], [])).toBeNull();
@@ -407,20 +406,7 @@ describe('ciObservation', () => {
   });
 
   it('rejects a body that is not a runs list', () => {
-    expect(() => parseWorkflowRuns({ message: 'Not Found' }, 'acme/demo-app')).toThrow(
-      'invalid response',
-    );
-  });
-
-  it('leaves out runs of pull requests from forks, which the branch filter returns too', () => {
-    const body = recentRunsBody('acme/demo-app', [
-      { ...run({ id: 1, conclusion: 'failure' }), branch: 'main', headRepo: 'someone/demo-app' },
-      { ...run({ id: 2 }), branch: 'main', headRepo: 'Acme/Demo-App' },
-      { ...run({ id: 3, conclusion: 'failure' }), branch: 'main' },
-    ]) as { workflow_runs: Record<string, unknown>[] };
-    // A fork that was deleted since.
-    body.workflow_runs.push({ ...body.workflow_runs[0], id: 4, head_repository: null });
-    expect(parseWorkflowRuns(body, 'acme/demo-app').map((item) => item.id)).toEqual([2, 3]);
+    expect(() => parseWorkflowRuns({ message: 'Not Found' })).toThrow('invalid response');
   });
 
   describe('a workflow that was failing', () => {

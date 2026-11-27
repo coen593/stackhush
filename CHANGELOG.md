@@ -15,14 +15,6 @@
   as 0.2.0.
 - `GET /api/status` gains `branchCi` on a project (only when it has extra branches) and `checks`
   on a pull request (only when known).
-- Fixed: CI on the default branch no longer counts runs of pull requests from forks. GitHub's
-  branch filter goes by the branch's name, so a fork's pull request opened from its own `main`
-  was listed among the runs of your `main`, and a failing one made CI look red and sent an
-  alert. Such runs are now left out. This changes what is stored only for repos that get pull
-  requests from forks: a CI row that is red because of one turns green, with a "green again"
-  alert, as soon as a run of that workflow on the branch itself has succeeded after the fork's
-  run (at once if one already has). For every other repo the requests, rows and emails are as in
-  0.2.0.
 - No migration. See [docs/configuration.md](docs/configuration.md#extra-branches-and-pull-request-checks)
   and [docs/limits.md](docs/limits.md) for what a busy repo can push out of the 50 runs, and for
   the CPU time each such repo adds on Workers Free.

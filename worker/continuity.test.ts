@@ -8,11 +8,6 @@
 // test pass: a difference means an existing installation would store, send or remove something
 // else after an update. Record it again only for a change of behaviour that is meant, and say so
 // in the changelog.
-//
-// One thing is read differently on purpose since v0.3.0: runs of pull requests from forks no
-// longer count for the default branch (worker/sources/sources.test.ts, worker/branches.test.ts).
-// The runs in this history all name their own repo as GitHub's do, v0.2.0 did not look at that
-// field, and the recording still holds: without fork runs nothing changed.
 
 import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -149,21 +144,6 @@ function personalGraphql(world: World, requestBody: string): unknown {
   return body;
 }
 
-/**
- * The runs of a repo as GitHub lists them: each names the repo its branch lives in. All of them
- * are the repo's own here; runs of pull requests from forks are what v0.3.0 reads differently.
- */
-function ownRunsBody(repo: string, runs: FixtureRun[]): unknown {
-  const body = workflowRunsBody(runs) as { workflow_runs: Record<string, unknown>[] };
-  return {
-    ...body,
-    workflow_runs: body.workflow_runs.map((run) => ({
-      ...run,
-      head_repository: { full_name: repo },
-    })),
-  };
-}
-
 function network(world: World, requests: Request[]): Fetcher {
   return (url, init) => {
     const body = typeof init?.body === 'string' ? init.body : null;
@@ -182,13 +162,13 @@ function network(world: World, requests: Request[]): Fetcher {
     if (url.startsWith('https://api.github.com/repos/acme-org/')) {
       return Promise.resolve(
         json(
-          ownRunsBody('acme-org/other-site', [ciRun('success', 9, '2026-11-26T09:30:00Z')]),
+          workflowRunsBody([ciRun('success', 9, '2026-11-26T09:30:00Z')]),
           world.workGithubStatus,
         ),
       );
     }
     if (url.startsWith('https://api.github.com/repos/')) {
-      return Promise.resolve(json(ownRunsBody('acme/demo-app', world.ciRuns)));
+      return Promise.resolve(json(workflowRunsBody(world.ciRuns)));
     }
     if (url.startsWith('https://api.supabase.com/')) {
       const projects = supabaseBody() as unknown[];
