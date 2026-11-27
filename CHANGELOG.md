@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- More branches per repo: `github.extraBranches` in a project (for example `['staging']`) watches
+  CI on those branches by the rules of the default branch. Each has its own row on the dashboard
+  ("CI (staging)") and its own alerts ("CI on staging went red", "is green again"). The default
+  branch's check is unchanged, and so is everything stored for it.
+- Checks on open pull requests: with `github.pullRequestChecks: true` each open PR shows whether
+  the Actions runs on its head commit are passing, failing or running, and such PRs are listed
+  as rows. Dashboard only: no email, no push, no problem, no event.
+- Either or both cost one more subrequest per run for that repo (its 100 most recent runs on any
+  branch). `defineConfig` counts it, so a config that no longer fits its `subrequestBudget` is
+  refused at build. A config that uses neither makes the same requests and stores the same rows
+  as 0.2.0.
+- `GET /api/status` gains `branchCi` on a project (only when it has extra branches) and `checks`
+  on a pull request (only when known).
+- No migration. See [docs/configuration.md](docs/configuration.md#extra-branches-and-pull-request-checks)
+  and [docs/limits.md](docs/limits.md) for what a busy repo can push out of the 100 runs.
+
 ## 0.2.0
 
 - Push notifications, server side: a run that sends an alert email also sends one Web Push

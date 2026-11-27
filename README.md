@@ -47,14 +47,14 @@ the record. See
 
 ## What it watches
 
-| Source               | What you see                                                                                            | Needs                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Uptime               | Each production URL: status code and latency. Down after two failed checks in a row.                    | Nothing                                               |
-| GitHub Actions       | Whether CI on a repo's main branch is passing, and which workflow fails.                                | GitHub token, Actions: read                           |
-| GitHub Deployments   | Whether the last deploy to each environment succeeded (for hosts such as Vercel that report to GitHub). | GitHub token, Deployments: read                       |
-| GitHub pull requests | Open PRs, and the ones that are waiting for your review.                                                | GitHub token, Pull requests: read                     |
-| Supabase             | Whether each project is healthy or paused.                                                              | Supabase token, Projects (account-wide): Read         |
-| Cloudflare Workers   | Error rate of each Worker over the last 30 minutes.                                                     | Cloudflare token, Analytics and Workers Scripts: read |
+| Source               | What you see                                                                                                                                                      | Needs                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Uptime               | Each production URL: status code and latency. Down after two failed checks in a row.                                                                              | Nothing                                                              |
+| GitHub Actions       | Whether CI on a repo's main branch is passing, and which workflow fails. Optionally more branches, such as `staging`, each with its own row and alerts.           | GitHub token, Actions: read                                          |
+| GitHub Deployments   | Whether the last deploy to each environment succeeded (for hosts such as Vercel that report to GitHub).                                                           | GitHub token, Deployments: read                                      |
+| GitHub pull requests | Open PRs, and the ones that are waiting for your review. Optionally whether the checks on each PR are passing, failing or running (shown only, never alerted on). | GitHub token, Pull requests: read (and Actions: read for the checks) |
+| Supabase             | Whether each project is healthy or paused.                                                                                                                        | Supabase token, Projects (account-wide): Read                        |
+| Cloudflare Workers   | Error rate of each Worker over the last 30 minutes.                                                                                                               | Cloudflare token, Analytics and Workers Scripts: read                |
 
 A cron job runs every five minutes. It compares what it sees with what it saw last time and sends
 one email, only when something changed: a site went down or came back, CI went red or green, a
@@ -143,7 +143,8 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 - Every check runs every five minutes, and the Workers Free plan allows 50 subrequests per run.
   A config that needs more than `subrequestBudget` (default 45) is refused with the number it
-  needs: roughly one per site and repo, six per GitHub token, one for Supabase, two per Cloudflare
+  needs: roughly one per site and repo (two for a repo with extra branches or pull request
+  checks), six per GitHub token, one for Supabase, two per Cloudflare
   account. Bigger setups need Workers Paid and a higher `subrequestBudget`. Spreading checks over
   several runs is not in this version; it may come later.
 - A workflow deleted while it was failing can stay red, a removed Vercel project can keep its

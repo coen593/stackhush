@@ -311,7 +311,8 @@ stackhush makes every check in every run. The Workers Free plan allows 50 subreq
 run; `subrequestBudget` is how many a run may make, 45 unless the config says otherwise, and a
 run never makes more.
 
-A run needs one subrequest per uptime URL, one per repo plus six per GitHub token (one batched
+A run needs one subrequest per uptime URL, one per repo (two for a repo with `extraBranches` or
+`pullRequestChecks`) plus six per GitHub token (one batched
 call and room for five workflow lookups), one for Supabase and two per Cloudflare account with
 Workers. Calls to D1 and the email service have their own limit and are not counted. A config
 that needs more than the budget is refused, at build, at Worker start and by `npm run deploy`,

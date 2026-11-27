@@ -110,8 +110,9 @@ observations) -> (new state, transitions)`; `worker/store.ts` does the D1 reads 
 
 Every run makes every check; nothing takes turns across runs (that was built and taken out
 before v0.1: it kept producing edge cases; it may come back later). `plannedSubrequests`
-(`worker/config.ts`) adds up a run: 1 per uptime URL, 1 per repo, 6 per GitHub token with repos,
-1 Supabase, 2 per Cloudflare account in use. D1 and the email binding are not subrequests of
+(`worker/config.ts`) adds up a run: 1 per uptime URL, 1 per repo (2 for a repo with
+`extraBranches` or `pullRequestChecks`, see "Extra branches and pull request checks"), 6 per
+GitHub token with repos, 1 Supabase, 2 per Cloudflare account in use. D1 and the email binding are not subrequests of
 this limit. `defineConfig` refuses a config that needs more than `subrequestBudget` (default 45),
 so it fails at build, at Worker start and in `npm run deploy`.
 
@@ -131,6 +132,36 @@ problem "Over the subrequest budget: <url> needs at least N more" until a check 
 Pushes are paid last: `runChecks` counts every request its checks make (a counting fetcher) and
 gives the pushes what is left of the budget at the end, so a push never takes a subrequest from
 a check or a redirect.
+
+## Extra branches and pull request checks
+
+Two optional fields of a project's `github` entry (`worker/config.ts`): `extraBranches` (CI
+watched on more branches, with rows and alerts of their own) and `pullRequestChecks` (passing,
+failing or running on each open PR, dashboard only). A repo with either makes ONE more request
+per run (`needsRecentRuns`, counted by `plannedSubrequests`): its 100 most recent runs on any
+branch (`fetchRecentRuns` in `worker/sources/github.ts`), filtered in code by `head_branch` (own
+repo only, not forks) and by `head_sha`. The default branch keeps its own branch-filtered request
+and its check key `ci`, untouched.
+
+- An extra branch's check key is `ci:<branch>` (`branchCiCheckKey`), its label `CI (<branch>)`,
+  its kind `ci`; `StateObservation.branch` puts the branch in the alert titles. It goes through
+  the same `ciObservation`, with `failing` and `gone` in its own row's `detail_json`. The lookups
+  of held-red workflows are shared (5 per token): default branches first, one lookup per repo
+  and workflow.
+- Scroll-out: when none of a branch's runs are among the 100, the observation is `unknown`
+  ("No recent runs"), which keeps the stored state and keeps the row from being pruned. Never
+  return nothing for a configured extra branch whose request worked.
+- PR checks ride on the `pull_requests` observation as `checks` on a PR (absent when not known);
+  head commits come from a separate GraphQL field (`heads`) so an error there loses only the
+  marks. Nothing about them may produce a transition, an event, an email, a push, a problem or a
+  failing source: a failed recent-runs request is an error of the source only for a repo with
+  extra branches.
+- `GET /api/status`: `ProjectView.branchCi` (left out without extra branches) and
+  `PullRequestView.checks`. The page lists a PR as a row when your review is requested or its
+  checks are known.
+- `worker/continuity.test.ts` replays a recorded history (made with v0.2.0) and fails when a
+  config without these fields requests, stores, sends or removes anything else. Do not refresh
+  its snapshot to make it pass. `worker/branches.test.ts` covers the two features.
 
 ## Push
 

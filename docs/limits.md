@@ -24,6 +24,41 @@ run, from a push or its schedule). The lookup does not happen in two cases:
   that cancelled or skipped run in GitHub (Actions, the run, "Delete workflow run"). It is
   looked up and forgotten on the next run.
 
+**An extra branch is read from the repo's 100 most recent runs, and a busy repo can push a
+branch's runs out of them.** The default branch has a request of its own that lists only its
+runs. Extra branches (`extraBranches`) and pull request checks share one request for the repo's
+100 most recent runs on any branch, to stay inside the request limit; scheduled workflows and
+runs triggered by issues or comments count among those 100 too. When a branch's runs are no
+longer among them:
+
+- A red branch stays red. What was failing is remembered per branch, so nothing is reported as
+  green again and the row is never removed. It turns green when a check sees a newer successful
+  run of that workflow on that branch. A success that left the 100 before any check saw it (more
+  than 100 runs within the five minutes between two checks, or while the Worker was not running)
+  does not count: the branch stays red until the next one.
+- A green branch keeps its row and its state. A branch with no run among the 100 since it was
+  added shows "No recent runs".
+- A failure can be missed only if it leaves the 100 before any check sees it: more than 100 newer
+  runs in the repo within five minutes.
+- The lookups of deleted workflows (above) are shared: at most 5 per GitHub token per run for all
+  branches together, default branches first. A workflow that fails on several branches of a repo
+  takes one.
+
+A workflow file removed from an extra branch alone, while the workflow still exists on other
+branches, is still "active" for GitHub: its failure on that branch stays red. Take the branch out
+of `extraBranches`, deploy, and add it back once the failed run is no longer among the repo's
+recent runs.
+
+**Pull request checks are shown, never alerted on.** With `pullRequestChecks`, each open PR shows
+whether the Actions runs on its head commit are passing, failing or running. A failing PR is not
+a problem on the dashboard, sends no email and no push, and writes no event, whatever happens.
+The mark is there only while runs on the PR's head commit are among the repo's 100 most recent
+runs; an older PR on a busy repo shows none. If that request fails, or the token may not read the
+head commits, the marks are left out and GitHub is not counted as failing because of it (for a
+repo that also has `extraBranches` the failed request does count: its branches could not be
+checked). Only Actions runs are read: checks reported by other apps do not show, because
+fine-grained tokens cannot read them. At most 30 open PRs per repo are listed.
+
 **A removed Vercel project keeps its Deploy row red.** Its last failed deployment stays on
 GitHub. The reliable way to clear it is to set `watchDeployments` to `false` for that repo in
 the config and deploy. Deleting the environment in the repo's settings (Settings, Environments)
@@ -40,8 +75,8 @@ removed in the first run in which the source works again after its token is back
 it fails removes nothing).
 
 **Every check runs every run, so the setup must fit the budget.** A run makes one subrequest per
-uptime URL, one per repo plus six per GitHub token, one for Supabase and two per Cloudflare account
-with Workers. A config that needs more than `subrequestBudget` (45 by default; the Workers Free
+uptime URL, one per repo (two for a repo with `extraBranches` or `pullRequestChecks`) plus six per
+GitHub token, one for Supabase and two per Cloudflare account with Workers. A config that needs more than `subrequestBudget` (45 by default; the Workers Free
 limit is 50) is refused with a message saying how many it needs. Bigger setups need Workers Paid
 and a higher `subrequestBudget`. Spreading checks over several runs is not in this version; it may
 come later.
