@@ -46,6 +46,18 @@ export interface ProjectConfig {
      * such as Vercel reports deploys to GitHub). False when left out.
      */
     watchDeployments?: boolean;
+    /**
+     * More branches whose CI is watched like the default branch, for example ['staging']. Each
+     * gets a row and alerts of its own. Costs one more subrequest per run for the repo (shared
+     * with `pullRequestChecks`).
+     */
+    extraBranches?: string[];
+    /**
+     * Whether the dashboard shows, on each open pull request, if the Actions runs on its head
+     * commit are passing, failing or running. Shown only: it never alerts. False when left out.
+     * Costs one more subrequest per run for the repo (shared with `extraBranches`).
+     */
+    pullRequestChecks?: boolean;
   };
   /** Checked for uptime. */
   productionUrls?: string[];
@@ -87,6 +99,9 @@ export interface GitHubRepo {
   ownerKey: string;
   defaultBranch: string;
   watchDeployments: boolean;
+  /** Branches besides the default one whose CI is watched; empty for most repos. */
+  extraBranches: readonly string[];
+  pullRequestChecks: boolean;
 }
 
 export interface CloudflareWorkers {
@@ -139,6 +154,11 @@ const UPTIME_URL_COST = 1;
 export const MAX_UPTIME_REDIRECTS = 5;
 /** One call for a repo's workflow runs. */
 const GITHUB_REPO_COST = 1;
+/**
+ * One more call, for the repo's recent runs on every branch, when the repo watches extra
+ * branches or shows the checks of its pull requests (both read the same answer).
+ */
+const GITHUB_RECENT_RUNS_COST = 1;
 /** Per token with at least one repo: the batched GraphQL call, and room for workflow lookups. */
 const GITHUB_OWNER_COST = 1 + MAX_WORKFLOW_LOOKUPS;
 const SUPABASE_COST = 1;
@@ -153,6 +173,11 @@ const KEY_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
 // A GitHub login: letters, digits and dashes, at most 39 characters.
 const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const GITHUB_REPO_PATTERN = /^[\w.-]+$/;
+// A branch name as git allows it, without the rarer characters: parts of letters, digits, '.',
+// '_' and '-' joined by single slashes, and no '..'. Stored in the check key ('ci:<branch>'), so
+// no '|'.
+const BRANCH_PATTERN = /^[A-Za-z0-9_-][\w.-]*(?:\/[A-Za-z0-9_-][\w.-]*)*$/;
+const MAX_BRANCH_LENGTH = 100;
 const CLOUDFLARE_ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const SUPABASE_REF_PATTERN = /^[a-z0-9]{20}$/;
 // Stored in keys that are joined with '|', so no '|' and no white space.
@@ -191,6 +216,11 @@ export interface SourceName {
   source: string;
   /** Names the source in alert titles and on the dashboard. */
   label: string;
+}
+
+/** Whether a run makes the extra call for the repo's recent runs on every branch. */
+export function needsRecentRuns(repo: GitHubRepo): boolean {
+  return repo.extraBranches.length > 0 || repo.pullRequestChecks;
 }
 
 /** Every source of a config, in the order the dashboard lists them. */
@@ -331,7 +361,12 @@ function projectShapeProblems(where: string, project: unknown): string[] {
         `${where}github.`,
         fields['github'],
         { owner: 'string', repo: 'string' },
-        { defaultBranch: 'string', watchDeployments: 'boolean' },
+        {
+          defaultBranch: 'string',
+          watchDeployments: 'boolean',
+          extraBranches: 'strings',
+          pullRequestChecks: 'boolean',
+        },
       ),
     );
   }
@@ -374,6 +409,8 @@ function resolveProject(project: ProjectConfig, owners: readonly GitHubOwner[]):
           ownerKey: project.github.owner,
           defaultBranch: project.github.defaultBranch ?? DEFAULT_BRANCH,
           watchDeployments: project.github.watchDeployments ?? false,
+          extraBranches: project.github.extraBranches ?? [],
+          pullRequestChecks: project.github.pullRequestChecks ?? false,
         }
       : null,
     productionUrls: project.productionUrls ?? [],
@@ -491,6 +528,7 @@ function checkProjects(config: Config, inputs: readonly ProjectConfig[], problem
     }
     if (input.github.defaultBranch?.trim() === '')
       problems.push(`${where}: defaultBranch is empty`);
+    checkExtraBranches(where, input.github, problems);
   }
 
   const refs = config.projects.flatMap((project) => project.supabaseRef ?? []);
@@ -502,6 +540,28 @@ function checkProjects(config: Config, inputs: readonly ProjectConfig[], problem
     ),
   );
   for (const script of duplicates(scripts)) problems.push(`Worker "${script}" is listed twice`);
+}
+
+function checkExtraBranches(
+  where: string,
+  github: NonNullable<ProjectConfig['github']>,
+  problems: string[],
+): void {
+  const branches = github.extraBranches ?? [];
+  for (const branch of new Set(branches)) {
+    const isName =
+      BRANCH_PATTERN.test(branch) && !branch.includes('..') && branch.length <= MAX_BRANCH_LENGTH;
+    if (!isName) {
+      problems.push(`${where}: extra branch "${branch}" is not a branch name`);
+    }
+    // Its CI is the 'ci' check already; a second check for it would alert twice.
+    if (branch === (github.defaultBranch ?? DEFAULT_BRANCH)) {
+      problems.push(`${where}: extra branch "${branch}" is the default branch`);
+    }
+  }
+  for (const branch of duplicates(branches)) {
+    problems.push(`${where}: extra branch "${branch}" is listed twice`);
+  }
 }
 
 function checkProjectUrls(where: string, urls: readonly string[], problems: string[]): void {
@@ -524,21 +584,24 @@ interface TokensPresent {
 const ALL_TOKENS: TokensPresent = { github: () => true, supabase: true, cloudflare: true };
 
 /**
- * The subrequests one run plans, before redirects: one per uptime URL, one per repo plus the
- * overhead of each token that has repos, Supabase, and two per Cloudflare account with Workers.
+ * The subrequests one run plans, before redirects: one per uptime URL, one per repo (two when
+ * it watches extra branches or shows pull request checks) plus the overhead of each token that
+ * has repos, Supabase, and two per Cloudflare account with Workers.
  * Every run makes every check, so this is the same each time.
  */
 export function plannedSubrequests(config: Config, tokens: TokensPresent = ALL_TOKENS): number {
   const urls = config.projects.flatMap((project) => project.productionUrls).length;
-  const repoOwners = config.projects
-    .flatMap((project) => project.github?.ownerKey ?? [])
-    .filter((ownerKey) => tokens.github(ownerKey));
+  const repos = config.projects
+    .flatMap((project) => project.github ?? [])
+    .filter((repo) => tokens.github(repo.ownerKey));
+  const repoOwners = repos.map((repo) => repo.ownerKey);
   const accountsInUse = new Set(
     config.projects.flatMap((project) => project.cloudflare?.accountKey ?? []),
   );
   return (
     urls * UPTIME_URL_COST +
-    repoOwners.length * GITHUB_REPO_COST +
+    repos.length * GITHUB_REPO_COST +
+    repos.filter(needsRecentRuns).length * GITHUB_RECENT_RUNS_COST +
     new Set(repoOwners).size * GITHUB_OWNER_COST +
     (tokens.supabase ? SUPABASE_COST : 0) +
     (tokens.cloudflare ? accountsInUse.size * CLOUDFLARE_ACCOUNT_COST : 0)

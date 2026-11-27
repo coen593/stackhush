@@ -57,6 +57,8 @@ describe('defineConfig', () => {
         ownerKey: 'my-org',
         defaultBranch: 'main',
         watchDeployments: false,
+        extraBranches: [],
+        pullRequestChecks: false,
       },
       productionUrls: ['https://shop.example.test'],
       supabaseRef: 'abcdefghijklmnopqrst',
@@ -283,6 +285,102 @@ describe('defineConfig', () => {
     // A source without its token is not called.
     const tokens = { github: (key: string) => key === 'two', supabase: false, cloudflare: false };
     expect(plannedSubrequests(config, tokens)).toBe(2 + 1 + 6);
+  });
+
+  it('plans one more for a repo with extra branches or pull request checks, and refuses on it', () => {
+    // As above: 11 without either.
+    const withBoth = (subrequestBudget: number): StackhushConfig => {
+      const config = { ...valid(), subrequestBudget };
+      const [project] = config.projects;
+      if (project?.github) {
+        project.github.extraBranches = ['staging'];
+        project.github.pullRequestChecks = true;
+      }
+      return config;
+    };
+    expect(plannedSubrequests(defineConfig(withBoth(12)))).toBe(12);
+    expect(() => defineConfig(withBoth(11))).toThrow(
+      'this config needs 12 subrequests every run and subrequestBudget is 11',
+    );
+  });
+
+  it('leaves room for redirects and two push devices in a 13-repo setup with two such repos', () => {
+    // 13 repos over 2 tokens (13 + 12), a site each (13), Supabase (1), 2 Cloudflare accounts (4).
+    const projects = Array.from({ length: 13 }, (_, index) => ({
+      id: `p${index}`,
+      name: `P${index}`,
+      group: 'Work',
+      github: {
+        owner: index < 7 ? 'one' : 'two',
+        repo: `repo-${index}`,
+        ...(index < 2 ? { extraBranches: ['staging'], pullRequestChecks: true } : {}),
+      },
+      productionUrls: [`https://p${index}.example.test`],
+      cloudflare: { account: index < 7 ? 'main' : 'second', scripts: [`worker-${index}`] },
+    }));
+    const config = defineConfig({
+      ...valid(),
+      subrequestBudget: 50,
+      github: [
+        { key: 'one', owner: 'acme', logins: [] },
+        { key: 'two', owner: 'acme-org', logins: [] },
+      ],
+      cloudflare: [
+        { key: 'main', accountId: '11111111111111111111111111111111' },
+        { key: 'second', accountId: '22222222222222222222222222222222' },
+      ],
+      projects,
+    });
+    const learnedRedirects = 3;
+    expect(plannedSubrequests(config)).toBe(43 + 2);
+    expect(config.subrequestBudget - plannedSubrequests(config) - learnedRedirects).toBe(2);
+  });
+
+  it('checks the extra branches of a repo', () => {
+    const withBranches = (extraBranches: string[], defaultBranch?: string) =>
+      problemsOf((config) => {
+        const github = config.projects[0]?.github;
+        if (!github) return;
+        github.extraBranches = extraBranches;
+        if (defaultBranch !== undefined) github.defaultBranch = defaultBranch;
+      });
+    expect(withBranches(['staging', 'release/2.x', 'feat_a-b'])).toBe('');
+    for (const bad of [
+      '',
+      ' staging',
+      'a b',
+      'a|b',
+      'a..b',
+      '/a',
+      'a/',
+      'a//b',
+      '.hidden',
+      'ci:x',
+    ]) {
+      expect(withBranches([bad]), bad).toContain(`extra branch "${bad}" is not a branch name`);
+    }
+    expect(withBranches(['x'.repeat(101)])).toContain('is not a branch name');
+    expect(withBranches(['staging', 'staging'])).toContain(
+      'project "shop": extra branch "staging" is listed twice',
+    );
+    expect(withBranches(['main'])).toContain(
+      'project "shop": extra branch "main" is the default branch',
+    );
+    expect(withBranches(['trunk'], 'trunk')).toContain(
+      'extra branch "trunk" is the default branch',
+    );
+    expect(withBranches(['main'], 'trunk')).toBe('');
+  });
+
+  it('says when the new repo fields are of the wrong kind', () => {
+    const message = problemsOf((config) => {
+      const github = config.projects[0]?.github as Record<string, unknown> | undefined;
+      if (!github) return;
+      github['extraBranches'] = 'staging';
+      github['pullRequestChecks'] = 'yes';
+    });
+    expect(message).toContain('projects[0].github.extraBranches must be a list of strings');
+    expect(message).toContain('projects[0].github.pullRequestChecks must be a boolean');
   });
 
   it('refuses the default budget for a config that is too big for it, and says what to do', () => {
