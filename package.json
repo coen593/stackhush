@@ -1,7 +1,7 @@
 {
   "name": "stackhush",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Quiet your stack: a private status dashboard and one alert email for your projects, on Cloudflare with read-only keys.",
   "license": "MIT",
   "repository": "github:coen593/stackhush",

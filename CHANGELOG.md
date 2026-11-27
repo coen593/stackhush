@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 - Push notifications, server side: a run that sends an alert email also sends one Web Push
   message per subscribed device, with the email's subject, the number of current problems and
