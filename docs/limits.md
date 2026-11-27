@@ -88,8 +88,14 @@ session of the browser that made it, and sessions last 180 days. When that sessi
 (signing out, the 180 days running out, or `DELETE FROM sessions`), the subscription gets
 nothing more from that moment and is deleted within five minutes. Signing in again on that
 device (in the Home Screen app on iPhone and iPad) and opening the dashboard re-attaches it to
-the new session; notifications need not be turned off and on. At most 10 devices are kept; an eleventh replaces the one that was
-active longest ago (last turned on or sent a notification).
+the new session; notifications need not be turned off and on. At most 10 devices are kept; an
+eleventh replaces the one that was active longest ago (last turned on or sent a notification).
+
+**A lost device that stays offline keeps its last copy for up to 7 days.** The app keeps the last
+status it loaded so it can open without a connection. Signing out removes that copy at once, and
+so does the next load that finds the session gone. A device that never goes online again after
+"sign out everywhere" can still show that last copy, marked as offline and dated, until it is 7
+days old; after that it is refused and deleted.
 
 **Each push is a subrequest, and the checks come first.** Pushes are sent at the end of a run
 from what the run has left of `subrequestBudget` after every check and every redirect it

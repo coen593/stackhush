@@ -8,7 +8,8 @@
   `VAPID_PRIVATE_KEY`, which `npm run push-keys` makes and stores without showing the private
   key. Without them nothing changes. See [docs/setup.md](docs/setup.md#9-push-notifications-optional).
 - New routes behind the session check: `POST /api/push/subscribe`, `/api/push/unsubscribe` and
-  `/api/push/test` (5 an hour). `GET /api/status` gains `push.vapidPublicKey` and `push.devices`.
+  `/api/push/test` (5 an hour). `GET /api/status` gains `push.vapidPublicKey`, `push.devices` and
+  `push.keys` (`absent`, `invalid` or `ready`; a mismatched key pair is caught and sends nothing).
 - A device gets notifications only while its browser is signed in: a subscription is deleted
   with the session that made it.
 - Each push is one subrequest, paid last from what a run has left of its budget after the
@@ -16,9 +17,9 @@
   on the dashboard; the email is always sent. Push is best effort and the email stays the
   record, see [docs/limits.md](docs/limits.md).
 - The dashboard is now a PWA: a service worker (`public/sw.js`) caches the app shell and the last
-  `/api/status` (nothing else), so the page opens offline with "Offline, last updated N min ago";
-  it shows push notifications, sets the app icon badge to the number of problems and focuses or
-  opens the dashboard when one is tapped.
+  `/api/status` (nothing else), so the page opens offline with a note saying how old the copy is;
+  a copy older than 7 days is refused and deleted. It shows push notifications, sets the app
+  icon badge to the number of problems and focuses or opens the dashboard when one is tapped.
 - A Notifications section at the bottom of the page: turn on (the permission is asked on that
   tap), send a test, turn off. On iPhone and iPad it asks for the Home Screen app first. A device
   whose subscription uses an older key subscribes again by itself. Signing out first removes
