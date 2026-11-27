@@ -1,0 +1,12 @@
+node_modules/
+# Your installation's projects, repos and addresses. To keep it under version control in a
+# private fork, delete the next line there.
+stackhush.config.ts
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

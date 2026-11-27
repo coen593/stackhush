@@ -1,0 +1,58 @@
+{
+  "name": "stackhush",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Quiet your stack: a private status dashboard and one alert email for your projects, on Cloudflare with read-only keys.",
+  "license": "MIT",
+  "repository": "github:coen593/stackhush",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check-config": "node scripts/check-config.ts",
+    "predev": "npm run check-config",
+    "dev": "vite --port 5173 --strictPort",
+    "prebuild": "npm run check-config",
+    "build": "tsc -b && vite build",
+    "prelint": "npm run check-config",
+    "lint": "eslint . --max-warnings 0",
+    "pretest": "npm run check-config",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "cf-typegen": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "preseed:local": "npm run check-config",
+    "seed:local": "node scripts/seed-local.ts",
+    "presignin-link:local": "npm run check-config",
+    "signin-link:local": "node scripts/signin-link.ts --local --url http://localhost:5173",
+    "signin-link": "node scripts/signin-link.ts --remote",
+    "deploy": "node scripts/check-config.ts --deploy && npm run db:migrate && node scripts/deploy-check.ts --remote && npm run build && wrangler deploy",
+    "prescreenshots": "npm run check-config",
+    "screenshots": "node scripts/screenshots.ts"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.65.0",
+    "@eslint/js": "10.0.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "eslint": "10.13.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.0.5",
+    "wrangler": "4.152.0"
+  }
+}

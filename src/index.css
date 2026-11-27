@@ -1,0 +1,70 @@
+@import 'tailwindcss';
+
+/* Colors are CSS variables so light and dark are one switch (the system setting). Status is
+   never shown by color alone: every status also has its own icon shape and a word. */
+:root {
+  color-scheme: light dark;
+  --bg: #f5f4ef;
+  --surface: #ffffff;
+  --line: #e3e0d6;
+  --ink: #1c1c1a;
+  --muted: #66655e;
+  --ok: #2b7a4b;
+  --bad: #b2321d;
+  --bad-soft: #fbece8;
+  --warn: #9a5f08;
+  --accent: #24508f;
+  --accent-soft: #e8eef8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121413;
+    --surface: #1b1d1c;
+    --line: #2d302e;
+    --ink: #ecebe5;
+    --muted: #9b9a92;
+    --ok: #74c493;
+    --bad: #ff8d75;
+    --bad-soft: #2d1c18;
+    --warn: #e3ab55;
+    --accent: #8db4f0;
+    --accent-soft: #1b2638;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-ok: var(--ok);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-warn: var(--warn);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+}
+
+@layer base {
+  body {
+    min-height: 100dvh;
+    background: var(--bg);
+    color: var(--ink);
+    font-family:
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      sans-serif;
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  a:focus-visible,
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}

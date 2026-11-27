@@ -1,0 +1,7 @@
+# Security headers for the static assets. API responses set the same ones in
+# worker/responses.ts; worker/headers.test.ts keeps the two in sync.
+/*
+  Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'
+  Referrer-Policy: no-referrer
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff

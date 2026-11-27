@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo"
+  },
+  "include": [
+    "worker",
+    "shared",
+    "worker-configuration.d.ts",
+    "stackhush.config.ts",
+    "stackhush.config.example.ts"
+  ],
+  "exclude": ["worker/**/*.test.ts", "worker/testing"]
+}

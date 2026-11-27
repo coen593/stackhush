@@ -1,0 +1,58 @@
+// A template. Four values are placeholders to replace with your own (see docs/setup.md):
+// account_id, the D1 database_id, the custom domain in "routes", and the email address in
+// "send_email". Everything about the projects you watch is in stackhush.config.ts instead.
+// In a private fork, commit this file with your real values.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Rename it if you like: it is the name of the Worker and of its workers.dev address.
+  "name": "stackhush",
+  // PLACEHOLDER: your Cloudflare account id. Pinned so wrangler refuses to deploy anywhere else.
+  "account_id": "00000000000000000000000000000000",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Uptime checks may fetch other Workers on this account's workers.dev subdomain. Without this
+  // flag such a fetch never leaves Cloudflare and fails with error 1042.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  // Keeps the workers.dev address on as a second way in.
+  // Set explicitly: wrangler defaults workers_dev to false when routes are present.
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "d1_databases": [
+    {
+      // The scripts and the Worker find the database by this binding; keep it "DB".
+      "binding": "DB",
+      "database_name": "stackhush",
+      // PLACEHOLDER: the id `npx wrangler d1 create stackhush` prints.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "routes": [
+    {
+      // PLACEHOLDER: the hostname of the dashboard, on a zone of this account. The same host as
+      // dashboardUrl in stackhush.config.ts. Remove "routes" to use only the workers.dev address.
+      "pattern": "status.example.com",
+      "custom_domain": true,
+    },
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
+  // Alert and sign-in emails go out through Cloudflare Email Service. The binding is pinned to
+  // one destination, so the Worker cannot send mail to anyone else.
+  "send_email": [
+    {
+      "name": "ALERT_EMAIL",
+      // PLACEHOLDER: a verified destination address on this account. The same address as alertTo
+      // in stackhush.config.ts.
+      "destination_address": "you@example.com",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}
