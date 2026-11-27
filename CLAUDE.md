@@ -79,6 +79,14 @@ observations) -> (new state, transitions)`; `worker/store.ts` does the D1 reads 
   (working, failing, not configured).
 - `worker/responses.ts` builds every API response with the security headers; `public/_headers`
   sets the same headers on static assets (`worker/headers.test.ts` keeps them in sync).
+- `public/sw.js` the service worker (plain JS, no build; served `Cache-Control: no-cache`). It
+  caches only the app shell (`stackhush-shell-<version>`) and the last good `/api/status`
+  (`stackhush-status-<version>`, served offline with an `X-Stackhush-Cached-At` header, dropped on
+  401), never an error or any other route; bump `VERSION` when its rules change.
+  `worker/serviceWorker.test.ts` runs it in a fake scope with synthetic push and click events.
+  `src/lib/push.ts` and `src/hooks/useNotifications.ts` are the page's side (subscribe, rotate on
+  a changed key, test, badge, sign-out cleanup); `src/components/Notifications.tsx` is the control.
+  `npm run icons` regenerates the PNG icons from `public/icon.svg` with headless Chrome.
 - `shared/api.ts` types for `GET /api/status`, used by both sides. Nothing private may live in
   `shared/`: it ships in the public bundle.
 - `migrations/` D1 schema. Tests run the real handler on these migrations via Node's SQLite

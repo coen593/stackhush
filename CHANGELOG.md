@@ -13,6 +13,16 @@
   redirects. Devices that do not fit get no notification and show as a problem on the
   dashboard; the email is always sent. Push is best effort and the email stays the record, see
   [docs/limits.md](docs/limits.md).
+- The dashboard is now a PWA: a service worker (`public/sw.js`) caches the app shell and the last
+  `/api/status` (nothing else), so the page opens offline with "Offline, last updated N min ago";
+  it shows push notifications, sets the app icon badge to the number of problems and focuses or
+  opens the dashboard when one is tapped.
+- A Notifications section at the bottom of the page: turn on (the permission is asked on that
+  tap), send a test, turn off. On iPhone and iPad it asks for the Home Screen app first. A device
+  whose subscription uses an older key subscribes again by itself. Signing out first removes
+  this device's subscription and clears the caches and the badge.
+- PNG icons (`apple-touch-icon.png`, 192, 512 and a maskable 512) made from `public/icon.svg` by
+  `npm run icons`; the manifest lists them.
 - New migration `0003_push.sql` (additive). `npm run deploy` applies it before deploying.
 
 ## 0.1.0

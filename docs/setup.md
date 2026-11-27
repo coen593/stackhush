@@ -274,6 +274,22 @@ Upgrading an installation from 0.1: `npm run deploy` applies the new migration
 (`0003_push.sql`) before it deploys. Nothing else is needed, and nothing changes until the keys
 are set.
 
+## 10. Notifications on the phone
+
+After step 9, open the dashboard on the phone and sign in.
+
+- **iPhone and iPad:** open it in Safari, choose Share, then Add to Home Screen, and open the
+  new icon. Notifications and the badge only work in that Home Screen app (iOS 16.4 or later).
+- **Android and desktop Chrome:** the browser works as it is; installing the page also works.
+
+At the bottom of the page, under Notifications, tap "Turn on notifications" and allow them when
+asked. "Send test notification" checks the whole path (5 an hour). "Turn off" and signing out
+both remove this device. If the page says push is not set up, step 9 is missing; if
+notifications are blocked, allow them in the browser or phone settings and reload.
+
+If you run `npm run push-keys` again, every device has to turn notifications off and on again
+(a device notices the new key by itself and subscribes again when the page is open).
+
 ## Bigger setups: the subrequest budget
 
 stackhush makes every check in every run. The Workers Free plan allows 50 subrequests per cron

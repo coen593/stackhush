@@ -27,6 +27,22 @@ The screenshots show made-up projects from the example config (`npm run screensh
 them from `npm run seed:local`, with placeholder tokens so every source counts as set; no API is
 called).
 
+## On your phone
+
+Add the dashboard to your Home Screen and it works like an app:
+
+- Push notifications on the same events that send the alert email (optional, needs the keys of
+  [setup step 9](docs/setup.md#9-push-notifications-optional)).
+- A badge on the app icon with the number of current problems.
+- An offline view: without a network it shows the last status it loaded, marked "Offline, last
+  updated N min ago".
+- Proper icons.
+
+On iPhone and iPad, notifications and the badge only work in the Home Screen app, not in a
+Safari tab: add it first (Share, Add to Home Screen) and turn notifications on from there. Push
+is best effort; the email stays the record. See
+[docs/setup.md](docs/setup.md#10-notifications-on-the-phone).
+
 ## What it watches
 
 | Source               | What you see                                                                                            | Needs                                                 |
@@ -134,7 +150,6 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- Next: a PWA with in-page and push notifications, so alerts do not depend on email alone.
 - Later: webhooks for Slack, Discord and ntfy.
 
 ## Contributing
