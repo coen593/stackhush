@@ -104,6 +104,9 @@ These are enforced by lint and tests where possible; keep them when you change c
 - Stored keys are a compatibility surface: `check_states (project_id, check_key)`,
   `source_health.source`, `notified_review_requests.repo` and secret names. Existing installations
   depend on them. Migrations are additive only.
+- Push is best effort and comes last: it never delays or fails the email, the run or a state
+  write, and a failed push never becomes an event or an alert. Tests never send to a real push
+  service.
 - Every run makes every check and never more subrequests than `subrequestBudget`. A stored
   check is only removed in a run in which its source was called and worked.
 - A source without its token is "not configured": not called, never failing, never alerting.

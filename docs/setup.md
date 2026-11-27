@@ -235,6 +235,45 @@ Once a test alert has arrived (for example after a deliberate failure), turn off
 Vercel, Cloudflare and Supabase notification emails at the source. Billing, domain renewal and
 account security emails stay on.
 
+## 9. Push notifications (optional)
+
+The dashboard can also send a push notification to your phone whenever it sends an alert email.
+Without this step nothing changes: the dashboard says push is not set up, and email works as
+before.
+
+Push needs a key pair of its own (a VAPID pair, RFC 8292) that proves to the phone's push
+service that a message comes from your Worker. Make it once, after the first deploy:
+
+```bash
+npm run push-keys
+```
+
+It makes the pair in memory and hands each key to `wrangler secret put` on standard input, as
+the secrets `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. The private key is never shown and
+never written to a file, so there is nothing to keep safe or to paste. Like `signin-link`, it
+refuses to run without a `stackhush.config.ts` of your own. `npm run push-keys -- --dry-run`
+makes a pair, shows its public key and stores nothing.
+
+- `VAPID_PUBLIC_KEY` is the 65-byte uncompressed P-256 public key and `VAPID_PRIVATE_KEY` the
+  32-byte private scalar, both as unpadded base64url. That is the form other Web Push tools
+  use, so a pair you already have works too: set both with `npx wrangler secret put`.
+- Set both or neither. With one missing, or values that are not such keys, the dashboard shows
+  the problem "Push keys are not valid" and sends no notifications. If the script stops after
+  the first key, run it again.
+- Running the script again replaces the pair. Subscriptions belong to the pair they were made
+  with, so afterwards every device has to turn notifications off and on again. To drop the old
+  ones at once:
+  `npx wrangler d1 execute DB --remote --command "DELETE FROM push_subscriptions"`.
+- To switch push off, delete both secrets (`npx wrangler secret delete VAPID_PUBLIC_KEY`, and
+  the same for `VAPID_PRIVATE_KEY`). Stored subscriptions are kept and simply not used.
+
+Each device that has notifications on costs one subrequest in a run, see the next section. At
+most 10 devices are kept; an eleventh replaces the oldest.
+
+Upgrading an installation from 0.1: `npm run deploy` applies the new migration
+(`0003_push.sql`) before it deploys. Nothing else is needed, and nothing changes until the keys
+are set.
+
 ## Bigger setups: the subrequest budget
 
 stackhush makes every check in every run. The Workers Free plan allows 50 subrequests per cron
@@ -253,6 +292,12 @@ What the budget has left after those calls pays for the redirects of uptime chec
 stackhush follows itself (up to 5) and counts. A redirect there is no subrequest left for is not
 followed: the site keeps the state it had, and the dashboard shows "Over the subrequest budget"
 for that URL until it fits (see [limits.md](limits.md)).
+
+Push notifications come out of the same budget: one subrequest per device with notifications
+on, set aside in every run after the redirects that are already known. A setup that plans 43
+of a budget of 50 and follows 3 redirects has room for 4 devices. Devices that do not fit get
+no notification (the email is sent all the same) and the dashboard says "Over the subrequest
+budget: no push notification for N devices".
 
 Checks that take turns across runs, so that a big setup fits the Free plan, are not in this
 version. They may come later.
@@ -281,6 +326,10 @@ the dev server with placeholder tokens, which are never sent anywhere.
 (which points at `localhost:5173`) always matches. If another server holds only 127.0.0.1:5173,
 open `http://localhost:5173`. To use another port, pass it to both:
 `npm run dev -- --port 5174` and `node scripts/signin-link.ts --local --url http://localhost:5174`.
+
+Push notifications are off locally unless you give the local Worker keys of its own: put
+`VAPID_PUBLIC_KEY=...` and `VAPID_PRIVATE_KEY=...` in a `.dev.vars` file (git-ignored), in the
+form described in step 9. Never use the keys of a real installation there.
 
 "Email me a sign-in code" also works locally: no email is sent, the local email binding prints
 the path of a text file with the message to the dev server's output. The link in it points at

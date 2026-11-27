@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Push notifications, server side: a run that sends an alert email also sends one Web Push
+  message per subscribed device, with the email's subject, the number of current problems and
+  the dashboard's address. Optional: it needs the secrets `VAPID_PUBLIC_KEY` and
+  `VAPID_PRIVATE_KEY`, which `npm run push-keys` makes and stores without showing the private
+  key. Without them nothing changes. See [docs/setup.md](docs/setup.md#9-push-notifications-optional).
+- New routes behind the session check: `POST /api/push/subscribe`, `/api/push/unsubscribe` and
+  `/api/push/test` (5 an hour). `GET /api/status` gains `push.vapidPublicKey`.
+- Each push is one subrequest of the run's budget, set aside after the checks and their known
+  redirects. Devices that do not fit get no notification and show as a problem on the
+  dashboard; the email is always sent. Push is best effort and the email stays the record, see
+  [docs/limits.md](docs/limits.md).
+- New migration `0003_push.sql` (additive). `npm run deploy` applies it before deploying.
+
 ## 0.1.0
 
 First release.

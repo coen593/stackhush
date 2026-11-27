@@ -36,12 +36,17 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
   destination). `npm run deploy` refuses the templates, leftover `example.com` values, an
   `alertTo` that is not the email binding's destination and a `dashboardUrl` whose host no route
   serves (`worker/deployGuard.ts`, run by `scripts/check-config.ts --deploy`).
-- There are two migrations, 0001 and 0002. A third (`0003_spread.sql`, table `scheduled_units`)
-  existed only in unpublished commits and was never applied to a live database; a local
-  `.wrangler` state that has it is harmless.
+- There are three migrations: 0001, 0002 and `0003_push.sql` (push subscriptions, the test
+  rate limit, `run_state.push_short`). Another third one (`0003_spread.sql`, table
+  `scheduled_units`) existed only in unpublished commits and was never applied to a live
+  database; a local `.wrangler` state that has it is harmless.
 - Stored keys are a compatibility surface: `check_states (project_id, check_key)`,
   `source_health.source`, `notified_review_requests.repo` and the secret names. Existing
   installations depend on them; do not change how they are built. Migrations are additive only.
+- Push is optional too: the secrets `VAPID_PUBLIC_KEY` (65-byte uncompressed P-256 point) and
+  `VAPID_PRIVATE_KEY` (32-byte scalar), both unpadded base64url, read into `Secrets.vapid` as
+  `absent` (not set up, never a problem), `invalid` (one missing or not keys: a dashboard
+  problem, nothing sent) or `ready`.
 
 ## Layout
 
@@ -51,7 +56,8 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
 - `worker/api.ts` the router. `sessionFreeRoutes` is the complete list of routes that work
   without a session (the three sign-in POSTs; `worker/access.test.ts` pins the list). Every route
   in `protectedRoutes` sits behind the one session check, and the same test file checks each of
-  them without a session. Add new routes to `protectedRoutes`.
+  them without a session. Add new routes to `protectedRoutes`. `createWorker(config, fetcher)`
+  takes the fetcher both handlers use, so tests never reach the network.
 - `worker/access.ts`, `worker/tokens.ts` sign-in codes and sessions (stored as SHA-256 only).
 - `worker/emailSignin.ts` sign-in by email: the request, its caps, checking the typed code, and
   the cron cleanup. `worker/signinEmail.ts` composes the email. `shared/signinCode.ts` holds the
@@ -62,8 +68,13 @@ installation. No emojis; never `eslint-disable`, `@ts-ignore` or `@ts-expect-err
 observations) -> (new state, transitions)`; `worker/store.ts` does the D1 reads and writes;
   `worker/alerts.ts` composes and sends the one batched email through the `ALERT_EMAIL` binding.
   `worker/testing/fixtures.ts` holds the test config and synthetic API responses.
-- `worker/budget.ts` shares what the budget leaves among uptime redirects (see "The subrequest
-  budget" below).
+- `worker/budget.ts` shares what the budget leaves among uptime redirects and pushes (see "The
+  subrequest budget" below).
+- `worker/webPush.ts` Web Push with WebCrypto only, no dependency: RFC 8291 encryption
+  (aes128gcm) and the RFC 8292 VAPID header. `worker/webPush.test.ts` checks it against the
+  RFC 8291 Appendix A vector; `worker/testing/pushReceiver.ts` is the browser's side, for tests.
+  `worker/push.ts` has the subscriptions (validation, the cap of 10, deletion), sending, and
+  the test rate limit; see "Push" below.
 - `worker/status.ts` builds `GET /api/status`: groups, problems, events and one row per source
   (working, failing, not configured).
 - `worker/responses.ts` builds every API response with the security headers; `public/_headers`
@@ -93,9 +104,9 @@ so it fails at build, at Worker start and in `npm run deploy`.
 
 A run never makes more subrequests than the budget. Uptime checks follow redirects by hand
 (`redirect: 'manual'`, at most 5) and pay for them from what the budget has left after the plan
-(`allowRedirects` in `worker/budget.ts`): first the chains of URLs whose last check completed
-(`redirects` in the row's `detail_json`), then URLs whose last check ran short, then new ones
-from the shared spare. A URL that ran short never takes a subrequest from a completed chain,
+(`shareBudget` in `worker/budget.ts`): first the chains of URLs whose last check completed
+(`redirects` in the row's `detail_json`), then URLs whose last check ran short, then one per
+push subscription (see "Push"), then new redirects from the shared spare. A URL that ran short never takes a subrequest from a completed chain,
 and keeps its `short` mark through a check that could not reach it (only a chain followed to
 the end clears it).
 A redirect with no subrequest left is not followed: the observation is `unknown` (state kept)
@@ -103,6 +114,29 @@ and carries `learned` (`redirects`, and `short`: how many subrequests it lacked)
 of memory that is stored even with an unknown status. `worker/status.ts` turns `short` into the
 problem "Over the subrequest budget: <url> needs at least N more" until a check completes. Tests:
 `worker/budget.test.ts`, `worker/sources/uptimeRedirects.test.ts`.
+
+## Push
+
+Routes (all in `protectedRoutes`; bodies and answers are typed in `shared/api.ts`):
+`POST /api/push/subscribe` (the browser's `PushSubscription.toJSON()`; an upsert, so the page
+may repeat it), `POST /api/push/unsubscribe` (`{ endpoint }`), `POST /api/push/test`
+(`{ endpoint? }`: that device or all; 5 an hour through `push_test_sends`; answers outcome
+codes, never endpoints). The browser subscribes with `push.vapidPublicKey` from
+`GET /api/status` (null: not set up).
+
+A run pushes only when its alert email was accepted, and last: after `markAlertsSent` and
+`finishRun`, inside `afterRun`, which catches everything. The payload is `PushPayload`
+(`shared/api.ts`): the email subject, a short body, the number of current problems (for the
+badge) and `dashboardUrl`. 404 or 410 from the push service deletes that subscription; any
+other failure only counts up `consecutive_failures`. Push failures never write an event or an
+alert. `runChecks` counts the stored subscriptions before the checks and `shareBudget` sets a
+subrequest aside for each, after known redirects; the ones that do not fit (newest first) are
+skipped, their number is stored in `run_state.push_short`, and `worker/status.ts` shows it as
+a problem. Tests: `worker/push.test.ts`, the push block in `worker/access.test.ts`.
+
+`npm run push-keys` (the owner runs it, never an agent; `--dry-run` is safe) generates the
+pair and pipes each key to `wrangler secret put` on stdin. Never print, log or store the
+private key, and never send a push to a real push service from a test or a local run.
 
 ## Sign-in
 
