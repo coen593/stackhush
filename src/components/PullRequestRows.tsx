@@ -54,7 +54,7 @@ export default function PullRequestRows({ pullRequests }: PullRequestRowsProps) 
               Review
             </span>
           )}
-          <span className="min-w-0 flex-1 text-sm">
+          <span className="min-w-0 flex-1 text-sm [overflow-wrap:anywhere]">
             <span className="text-muted">#{pr.number}</span> {pr.title}
           </span>
           {pr.checks !== undefined && <ChecksBadge checks={pr.checks} />}
